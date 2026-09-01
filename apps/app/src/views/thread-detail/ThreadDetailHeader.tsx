@@ -103,6 +103,7 @@ export function ThreadDetailHeader({
     ownsWindowTopLeft,
     reservesWindowPanelToggle,
     secondaryPanelHost,
+    onCreatePane: contextOnCreatePane,
   } = usePaneContext();
   const isWindowPanelOpen =
     useContext(SecondaryPanelHostLayoutContext)?.isOpen === true;
@@ -251,6 +252,21 @@ export function ThreadDetailHeader({
         className="ml-1 flex items-center gap-0.5"
         data-thread-header-pane-actions=""
       >
+        {contextOnCreatePane ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className={cn(
+              HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
+              CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
+            )}
+            aria-label="Open new thread in pane"
+            onClick={contextOnCreatePane}
+          >
+            <Icon name="Plus" />
+          </Button>
+        ) : null}
         {showRightPanelToggle ? (
           <span className="inline-flex items-center gap-1.5">
             <AppCommandShortcutHint shortcut={panelShortcut} />

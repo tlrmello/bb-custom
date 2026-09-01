@@ -20,6 +20,7 @@ import { useNavigate } from "react-router-dom";
 import { useRouteState } from "@/hooks/useRouteState";
 import {
   getThreadRoutePath,
+  getRootComposeRoutePath,
   type ThreadRoutePathArgs,
 } from "@/lib/route-paths";
 import { useIsMutating } from "@tanstack/react-query";
@@ -35,12 +36,14 @@ import {
   computePaneRects,
   countPanes,
   findPane,
+  findPaneByContent,
   listPanes,
   movePane,
   removePane,
   replacePaneContent,
   resizeSplit,
   setFocus,
+  splitPane,
   swapPanes,
 } from "@/lib/split-layout";
 import { createSplitResizeSnapSession } from "@/lib/split-resize-snap";
@@ -419,6 +422,19 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
     [layout, maximizedPaneId, navigate, setLayout, setMaximizedPaneId],
   );
 
+  const createPane = useCallback(() => {
+    const current = store.get(splitLayoutAtom);
+    if (current === null) return;
+    const content: PaneContent = { kind: "new-thread" };
+    const existing = findPaneByContent(current.root, content);
+    const next =
+      existing === null
+        ? splitPane(current, current.focusedPaneId, "right", content)
+        : setFocus(current, existing.paneId);
+    if (next !== current) store.set(splitLayoutAtom, next);
+    navigate(getRootComposeRoutePath(), { replace: existing !== null });
+  }, [navigate, store]);
+
   const toggleMaximizePane = useCallback(
     (paneId: string) => {
       const current = store.get(splitLayoutAtom);
@@ -610,6 +626,7 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
           isTopRow
           ownsWindowTopLeft
           onNavigateInPane={navigateInPane}
+          onCreatePane={createPane}
         />
       </>
     );
@@ -646,6 +663,7 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
             onNavigateInPane={navigateInPane}
             onBeginPaneDrag={beginPaneDrag}
             onPruneStalePane={pruneStalePane}
+            onCreatePane={createPane}
           />
         </SplitWorkspaceSecondaryPanelHost>
       </div>
@@ -726,6 +744,7 @@ interface SplitTreeProps {
   onNavigateInPane: NavigateInPane;
   onBeginPaneDrag: BeginPaneDrag;
   onPruneStalePane: (paneId: string) => void;
+  onCreatePane: () => void;
 }
 
 function SplitTree(props: SplitTreeProps) {
@@ -777,6 +796,7 @@ function SplitTree(props: SplitTreeProps) {
           }
           onNavigateInPane={props.onNavigateInPane}
           onBeginPaneDrag={props.onBeginPaneDrag}
+          onCreatePane={props.onCreatePane}
         />
         {}
         <div
@@ -850,6 +870,7 @@ interface WorkspacePaneContentProps {
   ownsWindowTopLeft: boolean;
   onNavigateInPane: NavigateInPane;
   onBeginPaneDrag?: BeginPaneDrag;
+  onCreatePane: () => void;
 }
 
 function WorkspacePaneContent({
@@ -868,6 +889,7 @@ function WorkspacePaneContent({
   ownsWindowTopLeft,
   onNavigateInPane,
   onBeginPaneDrag,
+  onCreatePane,
 }: WorkspacePaneContentProps) {
   const navigateInPane = useCallback(
     (thread: ThreadRoutePathArgs) => onNavigateInPane(paneId, thread),
@@ -899,6 +921,7 @@ function WorkspacePaneContent({
       secondaryPanelHost,
       reservesWindowPanelToggle,
       onRequestClose,
+      onCreatePane,
       isMaximized,
       onToggleMaximize,
       onMoveToSide,
@@ -917,6 +940,7 @@ function WorkspacePaneContent({
       ownsWindowTopLeft,
       navigateInPane,
       onRequestClose,
+      onCreatePane,
       isMaximized,
       onToggleMaximize,
       onMoveToSide,

@@ -342,6 +342,15 @@ vi.mock("./ThreadDetailView", () => ({
             close
           </button>
         ) : null}
+        {pane?.onCreatePane ? (
+          <button
+            type="button"
+            data-testid={`new-pane-${threadId}`}
+            onClick={pane.onCreatePane}
+          >
+            new pane
+          </button>
+        ) : null}
         {pane?.onToggleMaximize ? (
           <button
             type="button"
@@ -548,7 +557,11 @@ function RouteAwareSplitArea() {
   return (
     <SplitThreadArea
       routeContent={
-        location.pathname.startsWith("/plugins/") ? docsContent : undefined
+        location.pathname === "/"
+          ? newThreadContent
+          : location.pathname.startsWith("/plugins/")
+            ? docsContent
+            : undefined
       }
     />
   );
@@ -1717,6 +1730,25 @@ describe("SplitThreadArea", () => {
 
     expect(await screen.findByTestId("pane-thr-a")).toBeTruthy();
     expect(screen.getByTestId("pane-thr-b")).toBeTruthy();
+  });
+
+  it("opens one focused New Thread pane from the pane control", async () => {
+    const store = renderSplitArea({
+      path: threadPath("thr-a"),
+      routeAwareContent: true,
+    });
+
+    fireEvent.click(await screen.findByTestId("new-pane-thr-a"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("root-compose-view")).toBeTruthy();
+    });
+    expect(document.querySelectorAll("[data-split-pane-id]")).toHaveLength(2);
+    expect(store.get(splitLayoutAtom)?.focusedPaneId).toBe("pane-2");
+
+    fireEvent.click(screen.getByTestId("new-pane-thr-a"));
+
+    expect(document.querySelectorAll("[data-split-pane-id]")).toHaveLength(2);
   });
 
   it("restores eight successive default-right opens, then focuses and closes with valid URL state", async () => {

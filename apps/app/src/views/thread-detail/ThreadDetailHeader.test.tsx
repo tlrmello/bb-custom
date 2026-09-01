@@ -80,6 +80,29 @@ afterEach(() => {
 });
 
 describe("ThreadDetailHeader", () => {
+  it("opens a new thread in a pane when the current pane supports it", () => {
+    const onCreatePane = vi.fn();
+    render(
+      <PaneContext.Provider value={{ ...PANE_CONTEXT, onCreatePane }}>
+        <ThreadDetailHeader
+          actionsMenu={null}
+          childPillLabel={null}
+          isSecondaryPanelOpen={false}
+          onOpenThreadGitAction={vi.fn()}
+          onToggleSecondaryPanel={vi.fn()}
+          threadHeaderGitActions={[]}
+          threadId={THREAD_ID}
+          threadTitle="New pane"
+        />
+      </PaneContext.Provider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open new thread in pane" }),
+    );
+    expect(onCreatePane).toHaveBeenCalledOnce();
+  });
+
   it("leaves the open right-panel collapse control to the panel header", () => {
     render(
       <PaneContext.Provider value={PANE_CONTEXT}>

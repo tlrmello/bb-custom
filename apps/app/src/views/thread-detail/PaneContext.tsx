@@ -23,6 +23,7 @@ export interface PaneContextValue {
   secondaryPanelHost: PaneSecondaryPanelRegistration | null;
   reservesWindowPanelToggle: boolean;
   onRequestClose: (() => void) | null;
+  onCreatePane?: (() => void) | null;
   isMaximized: boolean;
   onToggleMaximize: (() => void) | null;
   onMoveToSide?: (side: SplitSide) => void;
@@ -155,6 +156,7 @@ export function DefaultPaneContextProvider({
       secondaryPanelHost: null,
       reservesWindowPanelToggle: false,
       onRequestClose: null,
+      onCreatePane: null,
       isMaximized: false,
       onToggleMaximize: null,
       isBoundedPane: false,
