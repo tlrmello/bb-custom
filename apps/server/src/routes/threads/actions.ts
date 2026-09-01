@@ -29,6 +29,7 @@ import {
 } from "@bb/domain";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
+import { emitPluginMessageCancelled } from "../../services/plugins/plugin-thread-events.js";
 import { toThreadQueuedMessage } from "../../services/threads/thread-queued-messages.js";
 import {
   requestEnvironmentCleanup,
@@ -362,6 +363,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     if (!deleted) {
       throw new ApiError(404, "invalid_request", "Queued message not found");
     }
+    emitPluginMessageCancelled(toThreadQueuedMessage(queuedMessage));
     return context.json({ ok: true });
   });
 
