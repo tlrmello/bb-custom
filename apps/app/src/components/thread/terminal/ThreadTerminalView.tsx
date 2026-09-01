@@ -44,7 +44,8 @@ import {
 } from "./terminal-links";
 
 export const TERMINAL_FONT_FAMILY =
-  '"JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Symbols Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+  'Consolas, "JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Symbols Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, "Liberation Mono", monospace';
+export const TERMINAL_FONT_SIZE = 14;
 export const TERMINAL_UNICODE_VERSION = "11";
 export const TERMINAL_ALLOW_PROPOSED_API = true;
 const TERMINAL_SELECTION_DRAG_DIRECTION_THRESHOLD_PX = 4;
@@ -907,7 +908,7 @@ export function ThreadTerminalView({
         convertEol: true,
         cursorBlink: true,
         fontFamily: TERMINAL_FONT_FAMILY,
-        fontSize: 12,
+        fontSize: TERMINAL_FONT_SIZE,
         linkHandler: osc8LinkHandler,
         scrollback: 10_000,
         theme: buildTerminalTheme(),
