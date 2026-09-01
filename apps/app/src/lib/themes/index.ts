@@ -4,6 +4,7 @@ import {
   type BuiltInThemeId,
 } from "@bb/domain";
 import { catppuccinThemeCss } from "./catppuccin";
+import { appleSystemColorsThemeCss } from "./apple-system-colors";
 import { draculaThemeCss } from "./dracula";
 import { gruvboxThemeCss } from "./gruvbox";
 import { nordThemeCss } from "./nord";
@@ -19,6 +20,7 @@ const builtInThemeCss: Record<BuiltInThemeId, string> = {
   solarized: solarizedThemeCss,
   gruvbox: gruvboxThemeCss,
   catppuccin: catppuccinThemeCss,
+  "apple-system-colors": appleSystemColorsThemeCss,
 };
 
 export function resolveAppThemeCss(appearance: AppTheme): string {

@@ -11,6 +11,7 @@ const builtInThemeIdSchema = z.enum([
   "solarized",
   "gruvbox",
   "catppuccin",
+  "apple-system-colors",
 ]);
 export type BuiltInThemeId = z.infer<typeof builtInThemeIdSchema>;
 
@@ -38,6 +39,11 @@ export const builtInThemes: readonly BuiltInThemeMeta[] = [
     id: "catppuccin",
     name: "Catppuccin",
     description: "Soothing pastel — Latte light, Mocha dark",
+  },
+  {
+    id: "apple-system-colors",
+    name: "Apple System Colors",
+    description: "Apple terminal colors from iTerm2",
   },
 ];
 
