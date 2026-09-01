@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createDesktopReleaseInfo,
   createDesktopUpdateFeedUrl,
   resolveDesktopUpdateSupport,
 } from "../src/desktop-update-provider.js";
@@ -12,6 +13,18 @@ describe("desktop update feed url", () => {
     expect(createDesktopUpdateFeedUrl("linux")).toBe(
       "https://github.com/get-bb/bb/releases/download/desktop-latest/desktop-version-linux.json",
     );
+  });
+});
+
+describe("custom desktop release", () => {
+  it("uses a separate app identity without an update feed", () => {
+    expect(createDesktopReleaseInfo("custom")).toEqual({
+      applicationName: "BB Custom",
+      channel: "custom",
+      iconFileName: "icon.png",
+      releaseTag: "desktop-custom",
+      updateReleaseBaseUrl: "",
+    });
   });
 });
 

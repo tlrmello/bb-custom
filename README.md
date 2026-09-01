@@ -127,6 +127,19 @@ To run that same source dev server with the Electron desktop shell:
 pnpm dev:desktop
 ```
 
+### BB Custom desktop app
+
+This checkout can build a separate local `BB Custom.app`. It has its own macOS
+application identity and does not check for or install official BB updates.
+
+```bash
+pnpm desktop:custom
+open "apps/desktop/release/mac-arm64/BB Custom.app"
+```
+
+Add the opened app to the Dock to start it without a Terminal. Rebuild it after
+you update this checkout or change its source.
+
 This uses `scripts/bb-dev-app current --desktop`, which stops stale launcher
 sessions, checks dependencies and native modules, starts the source dev server,
 then opens the desktop shell against that dev app. The launcher prints the web

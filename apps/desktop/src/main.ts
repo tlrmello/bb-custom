@@ -2139,13 +2139,17 @@ async function runDesktopApp(): Promise<void> {
     },
   });
 
-  const desktopUpdateSupport = resolveDesktopUpdateSupport({
-    canReplaceAppImage,
-    env: process.env,
-    platform: desktopPlatform,
-  });
+  const desktopUpdateSupport =
+    DESKTOP_RELEASE_CHANNEL === "custom"
+      ? { autoUpdate: false, versionCheck: false }
+      : resolveDesktopUpdateSupport({
+          canReplaceAppImage,
+          env: process.env,
+          platform: desktopPlatform,
+        });
   desktopUpdateService = createDesktopUpdateService({
-    channel: DESKTOP_RELEASE_CHANNEL,
+    channel:
+      DESKTOP_RELEASE_CHANNEL === "custom" ? "latest" : DESKTOP_RELEASE_CHANNEL,
     currentVersion: desktopVersion,
     enabled:
       desktopUpdateSupport.versionCheck &&

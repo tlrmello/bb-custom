@@ -573,7 +573,7 @@ describe("electron-builder signing config", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain(
-      "BB_DESKTOP_RELEASE_CHANNEL must be latest or nightly",
+      "BB_DESKTOP_RELEASE_CHANNEL must be latest, nightly, or custom",
     );
   });
 
