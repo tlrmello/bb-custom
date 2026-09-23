@@ -18,6 +18,8 @@ import { isRoutePath, resolveRouteHref } from "@/lib/route-paths";
 import { getDesktopBrowserApi } from "@/lib/bb-desktop";
 import { openPaneContentInSplit } from "@/lib/split-layout/openPaneContentInSplit";
 import { paneContentForPathname } from "@/views/thread-detail/splitThreadNavigation";
+import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";
+import { usePublishPluginDetailOpener } from "@/components/plugin/plugin-detail-opener";
 
 interface RouteNavigationProviderProps {
   children: ReactNode;
@@ -44,6 +46,9 @@ interface RouteNavigation {
 }
 
 const RouteNavigationContext = createContext<RouteNavigation | null>(null);
+const PluginDetailRouteNavigationContext = createContext<
+  ((pluginId: string) => boolean) | null
+>(null);
 
 const RouteNavigationPendingContext = createContext(false);
 
@@ -149,10 +154,39 @@ export function RouteNavigationProvider({
   );
 }
 
+export function PluginDetailRouteNavigationProvider({
+  children,
+  onOpenPluginDetail,
+}: {
+  children: ReactNode;
+  onOpenPluginDetail: (pluginId: string) => boolean;
+}) {
+  const pane = useOptionalPaneContext();
+  usePublishPluginDetailOpener(
+    ({ pluginId }) => onOpenPluginDetail(pluginId),
+    pane?.isFocused ?? true,
+  );
+  return (
+    <PluginDetailRouteNavigationContext.Provider value={onOpenPluginDetail}>
+      {children}
+    </PluginDetailRouteNavigationContext.Provider>
+  );
+}
+
+function anchorInScope(root: HTMLElement, anchor: HTMLAnchorElement): boolean {
+  if (root.contains(anchor)) return true;
+  const pluginId = root.getAttribute("data-bb-plugin");
+  const overlay = anchor.closest("[data-bb-portaled-overlay]");
+  return (
+    pluginId !== null && overlay?.getAttribute("data-bb-plugin") === pluginId
+  );
+}
+
 export function useRouteAnchorDelegate(): (
   event: ReactMouseEvent<HTMLElement>,
 ) => void {
   const navigation = useContext(RouteNavigationContext);
+  const openPluginDetail = useContext(PluginDetailRouteNavigationContext);
   return useCallback(
     (event) => {
       if (navigation === null || event.defaultPrevented) return;
@@ -160,7 +194,9 @@ export function useRouteAnchorDelegate(): (
         event.target instanceof Element
           ? event.target.closest<HTMLAnchorElement>("a[href]")
           : null;
-      if (anchor === null || !event.currentTarget.contains(anchor)) return;
+      if (anchor === null || !anchorInScope(event.currentTarget, anchor)) {
+        return;
+      }
       const target = anchor.getAttribute("target");
       if (target !== null && target !== "" && target !== "_self") return;
       if (event.button !== 0 || event.altKey || event.shiftKey) return;
@@ -171,11 +207,18 @@ export function useRouteAnchorDelegate(): (
         href: anchor.getAttribute("href") ?? "",
       });
       if (route === null) return;
+      const content = paneContentForPathname(
+        route.path.split(/[?#]/)[0] ?? route.path,
+      );
+      if (
+        content?.kind === "plugin-detail" &&
+        openPluginDetail?.(content.pluginId)
+      ) {
+        event.preventDefault();
+        return;
+      }
       const opensBeside =
-        event.metaKey ||
-        event.ctrlKey ||
-        paneContentForPathname(route.path.split(/[?#]/)[0] ?? route.path)
-          ?.kind === "plugin-detail";
+        event.metaKey || event.ctrlKey || content?.kind === "plugin-detail";
       if (opensBeside) {
         if (navigation.openInSplit(route.path)) event.preventDefault();
         return;
@@ -183,7 +226,7 @@ export function useRouteAnchorDelegate(): (
       event.preventDefault();
       navigation.navigate(route.path);
     },
-    [navigation],
+    [navigation, openPluginDetail],
   );
 }
 

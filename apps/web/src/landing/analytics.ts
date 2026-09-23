@@ -1,4 +1,5 @@
 import type { PostHog } from "posthog-js";
+import { useEffect } from "react";
 import type { CtaPlacement } from "./site";
 
 type LandingEvent =
@@ -21,6 +22,22 @@ type LandingEvent =
   | {
       name: "landing_email_subscribed";
       properties: { placement: CtaPlacement };
+    }
+  | {
+      name: "marketplace_page_viewed";
+      properties: {
+        category?: string;
+        sort: "featured" | "recently-added" | "most-installed";
+        author?: string;
+      };
+    }
+  | {
+      name: "marketplace_plugin_detail_viewed";
+      properties: { plugin_id: string };
+    }
+  | {
+      name: "marketplace_install_command_copied";
+      properties: { plugin_id: string };
     };
 
 let client: PostHog | null = null;
@@ -48,6 +65,12 @@ export function initAnalytics(): void {
       client.capture(event.name, event.properties);
     }
   });
+}
+
+export function useInitAnalytics(): void {
+  useEffect(() => {
+    initAnalytics();
+  }, []);
 }
 
 export function trackLandingEvent(event: LandingEvent): void {

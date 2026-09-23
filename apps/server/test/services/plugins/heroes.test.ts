@@ -9,7 +9,10 @@ import {
   generatedSkillsRootPath,
   pluginCommandsSkillDir,
 } from "../../../src/services/plugins/plugin-commands-skill.js";
-import { resolveInjectedSkillSources } from "../../../src/services/skills/injected-skills.js";
+import {
+  resolveProjectSkillSourceFromContent,
+  resolveSkillCatalogEntries,
+} from "../../../src/services/skills/injected-skills.js";
 import { applyLoggedThreadLifecycleEvent } from "../../../src/services/threads/lifecycle-outcome.js";
 import {
   seedEvent,
@@ -23,6 +26,7 @@ import {
   testLogger,
   type TestAppHarness,
 } from "../../helpers/test-app.js";
+import { installFakeGitWorktreeProvider } from "../../helpers/environment-provider.js";
 
 const BASE = "http://127.0.0.1:3334";
 
@@ -119,35 +123,45 @@ describe("hero plugin: agent-enrichment", () => {
     expect(content).toContain("## bb docs —");
     expect(content).toContain("bb docs search <query...>");
 
-    const sources = resolveInjectedSkillSources(testLogger, {
+    const sources = resolveSkillCatalogEntries(testLogger, {
       additionalSkillsRootPaths: [
         generatedSkillsRootPath(harness.config.dataDir),
       ],
-      builtinSkillsRootPath: join(harness.config.dataDir, "builtin-skills"),
       dataDir: harness.config.dataDir,
       skillTreeRegistry: harness.deps.skillTreeRegistry,
-    });
+    }).map((entry) => entry.runtimeSource);
     expect(
       sources.find((source) => source.name === "plugin-commands"),
     ).toMatchObject({ kind: "tree", entryPath: "SKILL.md" });
   });
 
-  it("auto-imports its skills/ directory through the plugin skills tier", () => {
+  it("auto-imports its skills/ directory through the plugin skills tier", async () => {
     const pluginSkillRoots = harness.pluginService.listSkillRootContributions();
     expect(pluginSkillRoots).toContainEqual(
       expect.objectContaining({
         rootPath: join(EXAMPLES_DIR, "agent-enrichment", "skills"),
       }),
     );
-    const sources = resolveInjectedSkillSources(testLogger, {
-      builtinSkillsRootPath: join(harness.config.dataDir, "builtin-skills"),
+    const sources = resolveSkillCatalogEntries(testLogger, {
       dataDir: harness.config.dataDir,
       pluginSkillRoots,
       skillTreeRegistry: harness.deps.skillTreeRegistry,
-    });
+    }).map((entry) => entry.runtimeSource);
     const skill = sources.find((source) => source.name === "repo-conventions");
     expect(skill).toBeDefined();
-    expect(skill?.description).toContain("Conventions");
+    const skillRoot = join(
+      EXAMPLES_DIR,
+      "agent-enrichment",
+      "skills",
+      "repo-conventions",
+    );
+    const expected = resolveProjectSkillSourceFromContent(testLogger, {
+      candidatePath: skillRoot,
+      content: await readFile(join(skillRoot, "SKILL.md"), "utf8"),
+      directoryName: "repo-conventions",
+    });
+    expect(expected).not.toBeNull();
+    expect(skill?.description).toBe(expected?.description);
     expect(skill).toMatchObject({ kind: "tree", entryPath: "SKILL.md" });
   });
 });
@@ -155,6 +169,7 @@ describe("hero plugin: agent-enrichment", () => {
 describe("hero plugin: slack-bot", () => {
   it("webhook → spawn → thread.idle → chat.postMessage, end to end", async () => {
     const server = await startTestServer({ appVersion: APP_VERSION });
+    installFakeGitWorktreeProvider();
     const realFetch = globalThis.fetch;
     const slackCalls: Array<{ url: string; body: Record<string, unknown> }> =
       [];

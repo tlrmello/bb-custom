@@ -3,6 +3,7 @@ import { cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { Task } from "../../shared/contract.js";
+import { makeTask } from "../../test-fixtures.js";
 
 if (!globalThis.ResizeObserver) {
   globalThis.ResizeObserver = class {
@@ -51,7 +52,7 @@ const project = {
 };
 
 function createdTask(input: Record<string, unknown>): Task {
-  return {
+  return makeTask({
     id: TASK_ID,
     projectId: PROJECT_ID,
     number: 5,
@@ -63,10 +64,8 @@ function createdTask(input: Record<string, unknown>): Task {
     dueDate: (input.dueDate as string | null) ?? null,
     parentTaskId: (input.parentTaskId as string | null) ?? null,
     position: 1,
-    createdAt: "2026-07-15T00:00:00.000Z",
-    updatedAt: "2026-07-15T00:00:00.000Z",
     labelIds: (input.labelIds as string[]) ?? [],
-  };
+  });
 }
 
 describe("derivePrefix", () => {
@@ -81,6 +80,65 @@ describe("derivePrefix", () => {
 });
 
 describe("NewTaskDialog", () => {
+  it.each([
+    {
+      name: "Ctrl+Enter in title",
+      field: "Task title",
+      ctrlKey: true,
+      metaKey: false,
+    },
+    {
+      name: "Meta+Enter in title",
+      field: "Task title",
+      ctrlKey: false,
+      metaKey: true,
+    },
+    {
+      name: "Enter in title",
+      field: "Task title",
+      ctrlKey: false,
+      metaKey: false,
+    },
+    {
+      name: "Ctrl+Enter in due date",
+      field: "Due date",
+      ctrlKey: true,
+      metaKey: false,
+    },
+  ])("submits exactly once for $name", async ({ field, ctrlKey, metaKey }) => {
+    const createCalls: Array<Record<string, unknown>> = [];
+    const slot = renderSlot(
+      app.navPanels[0]!,
+      { subPath: PROJECT_ID },
+      {
+        rpc: {
+          listProjects: () => ({ projects: [project] }),
+          listFolders: () => ({ folders: [] }),
+          listPresets: () => ({ presets: [] }),
+          sidebarSummary: () => ({ projects: [] }),
+          listTasks: () => ({ tasks: [] }),
+          listLabels: () => ({ labels: [] }),
+          createTask: (input: Record<string, unknown>) => {
+            createCalls.push(input);
+            return { ok: true, task: createdTask(input) };
+          },
+        },
+      },
+    );
+    fireEvent.click(await slot.findByRole("button", { name: /New task/ }));
+    fireEvent.change(await slot.findByLabelText("Task title"), {
+      target: { value: "Keyboard submission" },
+    });
+    fireEvent.keyDown(slot.getByLabelText(field), {
+      key: "Enter",
+      ctrlKey,
+      metaKey,
+    });
+    await waitFor(() => expect(slot.navigateCalls).not.toHaveLength(0));
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0]).toMatchObject({ title: "Keyboard submission" });
+  });
+
   it("creates a task in the route's project with column defaults and navigates to it", async () => {
     const createCalls: Array<Record<string, unknown>> = [];
     const slot = renderSlot(

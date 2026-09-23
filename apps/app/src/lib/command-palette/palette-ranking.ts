@@ -32,6 +32,10 @@ function titleMatchPositions(title: string, query: string): number[] {
 export function rankPaletteActions(
   args: RankPaletteActionsArgs,
 ): RankedPaletteAction[] {
+  if (args.query.trim() === "") {
+    return args.actions.map((action) => ({ action, positions: [] }));
+  }
+
   const buildOrder = new Map(
     args.actions.map((action, index) => [action.id, index]),
   );
@@ -42,20 +46,11 @@ export function rankPaletteActions(
     recentRank.get(action.id) ?? Number.MAX_SAFE_INTEGER;
   const orderOf = (action: PaletteAction) => buildOrder.get(action.id) ?? 0;
 
-  if (args.query.trim() === "") {
-    return [...args.actions]
-      .sort(
-        (left, right) =>
-          rankOf(left) - rankOf(right) || orderOf(left) - orderOf(right),
-      )
-      .slice(0, PALETTE_RESULT_LIMIT)
-      .map((action) => ({ action, positions: [] }));
-  }
-
   const matches = fuzzyMatchText({
     items: args.actions,
     query: args.query,
-    getText: (action) => [action.title, action.group],
+    getText: (action) => action.title,
+    getAliases: (action) => [action.group],
     limit: PALETTE_RESULT_LIMIT,
   });
 

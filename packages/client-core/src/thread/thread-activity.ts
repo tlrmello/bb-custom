@@ -54,6 +54,19 @@ export function hasActiveGoalActivity(
   return thread.activity.activeGoalCount > 0;
 }
 
+export function isBusyThread(
+  thread: ThreadRuntimeShape & ThreadActivityStateShape,
+): boolean {
+  return (
+    isRuntimeBusyThread(thread) ||
+    hasActiveWorkflowActivity(thread) ||
+    hasActiveBackgroundAgentActivity(thread) ||
+    hasActiveBackgroundCommandActivity(thread) ||
+    hasActivePlanModeActivity(thread) ||
+    hasActiveGoalActivity(thread)
+  );
+}
+
 export interface ThreadListIndicatorState {
   hasPendingInteraction: boolean;
   hasUnsubmittedDraft: boolean;
@@ -130,6 +143,26 @@ export function hasThreadListWorkingActivity(
   );
 }
 
+export function threadListIndicatorStateForThread(
+  thread: ThreadListEntry,
+  hasUnsubmittedDraft: boolean,
+): ThreadListIndicatorState {
+  const unreadDone = isUnreadDoneThread(thread);
+  return {
+    hasPendingInteraction: thread.hasPendingInteraction,
+    hasUnsubmittedDraft,
+    hasUnreadError: unreadDone && thread.status === "error",
+    hasUnreadSuccess: unreadDone && thread.status !== "error",
+    isBackgroundAgentActive: hasActiveBackgroundAgentActivity(thread),
+    isBackgroundCommandActive: hasActiveBackgroundCommandActivity(thread),
+    isGoalActive: hasActiveGoalActivity(thread),
+    queuedWork: thread.queuedWork,
+    isPlanModeActive: hasActivePlanModeActivity(thread),
+    isRuntimeActive: isRuntimeBusyThread(thread),
+    isWorkflowActive: hasActiveWorkflowActivity(thread),
+  };
+}
+
 export function resolveThreadListIndicator(
   state: ThreadListIndicatorState,
 ): ThreadListIndicatorKind {
@@ -144,15 +177,10 @@ export function resolveThreadListIndicator(
   if (state.isWorkflowActive) return "workflow";
   if (state.isBackgroundAgentActive) return "background-agent";
   if (state.isBackgroundCommandActive) return "background-command";
-  // Queued work outranks a draft: the draft is the user's to send whenever,
-  // while a queued row is work already committed that has not run yet. It sits
-  // below every working arm above deliberately — a thread that is BOTH running
-  // and holding a queued follow-up is best described by what it is doing, and
-  // the queue rows above its composer say the rest.
   if (state.queuedWork === "failed") return "queued-failed";
+  if (state.hasUnreadSuccess) return "unread-success";
   if (state.queuedWork === "waiting") return "queued-waiting";
   if (state.hasUnsubmittedDraft) return "draft";
-  if (state.hasUnreadSuccess) return "unread-success";
   return "none";
 }
 
@@ -169,20 +197,6 @@ export interface CollapsedChildActivity {
   unread: boolean;
   unreadError: boolean;
 }
-
-export const NO_COLLAPSED_CHILD_ACTIVITY: CollapsedChildActivity = {
-  pending: false,
-  working: false,
-  hasUnsubmittedDraft: false,
-  runtimeWorking: false,
-  workflow: false,
-  backgroundAgent: false,
-  backgroundCommand: false,
-  planMode: false,
-  goal: false,
-  unread: false,
-  unreadError: false,
-};
 
 type ThreadActivityShape = ThreadStatusShape &
   ThreadRuntimeShape &
@@ -219,37 +233,13 @@ export function getCollapsedChildActivity(
     if (thread.hasPendingInteraction) {
       pending = true;
     }
-    const childRuntimeWorking = isRuntimeBusyThread(thread);
-    const childWorkflowActive = hasActiveWorkflowActivity(thread);
-    const childBackgroundAgentActive = hasActiveBackgroundAgentActivity(thread);
-    const childBackgroundCommandActive =
-      hasActiveBackgroundCommandActivity(thread);
-    const childPlanModeActive = hasActivePlanModeActivity(thread);
-    const childGoalActive = hasActiveGoalActivity(thread);
-    if (childRuntimeWorking) {
-      runtimeWorking = true;
-      working = true;
-    }
-    if (childWorkflowActive) {
-      workflow = true;
-      working = true;
-    }
-    if (childBackgroundAgentActive) {
-      backgroundAgent = true;
-      working = true;
-    }
-    if (childBackgroundCommandActive) {
-      backgroundCommand = true;
-      working = true;
-    }
-    if (childPlanModeActive) {
-      planMode = true;
-      working = true;
-    }
-    if (childGoalActive) {
-      goal = true;
-      working = true;
-    }
+    if (isBusyThread(thread)) working = true;
+    if (isRuntimeBusyThread(thread)) runtimeWorking = true;
+    if (hasActiveWorkflowActivity(thread)) workflow = true;
+    if (hasActiveBackgroundAgentActivity(thread)) backgroundAgent = true;
+    if (hasActiveBackgroundCommandActivity(thread)) backgroundCommand = true;
+    if (hasActivePlanModeActivity(thread)) planMode = true;
+    if (hasActiveGoalActivity(thread)) goal = true;
   }
   return {
     pending,

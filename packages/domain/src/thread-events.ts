@@ -113,7 +113,10 @@ export function refineTurnRequestRetryMarker(
   data: Pick<TurnRequestEventData, "retryOfRequestId" | "retryAttempt">,
   ctx: z.RefinementCtx,
 ): void {
-  if ((data.retryOfRequestId === undefined) !== (data.retryAttempt === undefined)) {
+  if (
+    (data.retryOfRequestId === undefined) !==
+    (data.retryAttempt === undefined)
+  ) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message:
@@ -162,6 +165,48 @@ export const systemErrorEventDataSchema = z
   });
 export type SystemErrorEventData = z.infer<typeof systemErrorEventDataSchema>;
 
+export function resolveSystemErrorReconnectProgress(args: {
+  code?: string;
+  message: string;
+  reconnectAttempt?: number;
+  reconnectTotal?: number;
+}): { attempt: number; total: number } | null {
+  if (
+    args.reconnectAttempt !== undefined &&
+    args.reconnectTotal !== undefined
+  ) {
+    return {
+      attempt: args.reconnectAttempt,
+      total: args.reconnectTotal,
+    };
+  }
+
+  if (args.code !== "provider_reconnect") {
+    return null;
+  }
+
+  const match = args.message
+    .trim()
+    .match(/^Reconnecting\.\.\.\s+(\d+)\/(\d+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const attempt = Number.parseInt(match[1] ?? "", 10);
+  const total = Number.parseInt(match[2] ?? "", 10);
+  if (
+    !Number.isFinite(attempt) ||
+    !Number.isFinite(total) ||
+    attempt <= 0 ||
+    total <= 0 ||
+    attempt > total
+  ) {
+    return null;
+  }
+
+  return { attempt, total };
+}
+
 const ownershipChangeOperationActionValues = [
   "assign",
   "release",
@@ -184,6 +229,8 @@ export const ownershipChangeOperationMetadataSchema = z.object({
 export type OwnershipChangeOperationMetadata = z.infer<
   typeof ownershipChangeOperationMetadataSchema
 >;
+
+export const THREAD_CONTEXT_CLEAR_OPERATION = "context_clear";
 
 export const systemOperationEventDataSchema = z.object({
   operation: z.string(),
@@ -238,6 +285,11 @@ export const systemThreadInterruptedEventDataSchema = z.object({
   cause: z.literal("host-connection-lost").optional(),
 });
 
+export const WORKSPACE_PROVISIONING_STEP_KEYS = {
+  workspacePath: "workspace-path",
+  workspaceBranch: "workspace-branch",
+} as const;
+
 export const provisioningTranscriptEntrySchema = z.object({
   type: z.enum(["step", "output"]),
   key: z.string(),
@@ -266,7 +318,7 @@ export type SystemThreadProvisioningStatus = z.infer<
 export const systemThreadProvisioningEventDataSchema = z.object({
   provisioningId: z.string(),
   status: systemThreadProvisioningStatusSchema,
-  environmentId: z.string(),
+  environmentId: z.string().nullable(),
   entries: z.array(provisioningTranscriptEntrySchema),
 });
 

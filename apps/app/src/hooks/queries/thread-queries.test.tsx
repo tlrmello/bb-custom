@@ -11,7 +11,7 @@ import type {
 import { COMPACT_VIEWPORT_QUERY } from "@bb/shared-ui/hooks/use-compact-viewport";
 import * as api from "@/lib/api";
 import { sdk } from "@/lib/sdk";
-import { makeThreadListEntry } from "@/test/fixtures/thread-list-entries";
+import { makeThreadListEntry } from "@bb/test-helpers/domain-fixtures";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { ARCHIVED_THREADS_PAGE_SIZE } from "./archived-threads-page-size";
 import {
@@ -23,9 +23,11 @@ import {
   threadQueryKey,
   threadTimelineQueryKey,
 } from "./query-keys";
+import { usePaletteRecentArchivedThreads } from "./palette-thread-queries";
 import {
   COMPACT_THREAD_TIMELINE_SEGMENT_LIMIT,
   didThreadDetailBootstrapRefreshAfterMount,
+  isPendingInteractionStateUnknown,
   useArchivedThreads,
   useChildThreads,
   useThread,
@@ -37,6 +39,14 @@ import {
   useThreadStorageLocation,
   useThreadTimeline,
 } from "./thread-queries";
+import {
+  makeProjectWithThreadsResponse,
+  makeSidebarBootstrapResponse,
+} from "@/test/fixtures/projects";
+import {
+  makeThreadResponse,
+  makeThreadTimelineResponse,
+} from "@/test/fixtures/thread-responses";
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
@@ -51,6 +61,7 @@ vi.mock("@/lib/sdk", () => ({
     threads: {
       get: vi.fn(),
       list: vi.fn(),
+      search: vi.fn(),
       queuedMessages: { list: vi.fn() },
       interactions: { list: vi.fn() },
       storageLocation: vi.fn(),
@@ -65,33 +76,16 @@ vi.mock("@/hooks/useRealtimeSubscription", () => ({
 }));
 
 const THREAD_WITH_INCLUDES = {
-  id: "thread-1",
-  projectId: "project-1",
-  environmentId: null,
-  providerId: "codex",
-  title: "Thread",
-  titleFallback: "Thread",
-  sectionId: null,
-  status: "idle",
-  parentThreadId: null,
-  sourceThreadId: null,
-  originKind: null,
-  originPluginId: null,
-  visibility: "visible",
-  archivedAt: null,
-  pinnedAt: null,
-  deletedAt: null,
-  lastReadAt: null,
-  latestAttentionAt: 1,
-  createdAt: 1,
-  updatedAt: 1,
-  runtime: {
-    displayStatus: "idle",
-    hostReconnectGraceExpiresAt: null,
-  },
-  activeBackgroundAgentCount: 0,
-  canSpawnChild: true,
-  queuedMessageCount: 0,
+  ...makeThreadResponse({
+    id: "thread-1",
+    projectId: "project-1",
+    environmentId: null,
+    title: "Thread",
+    titleFallback: "Thread",
+    latestAttentionAt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  }),
   environment: null,
   host: null,
 } satisfies ThreadWithIncludesResponse;
@@ -100,33 +94,25 @@ function makeSidebarNavigation(
   projectThreads: ThreadListEntry[],
   personalThreads: ThreadListEntry[] = [],
 ): SidebarBootstrapResponse {
-  return {
-    sections: [],
+  return makeSidebarBootstrapResponse({
     projects: [
-      {
+      makeProjectWithThreadsResponse({
         id: "project-1",
-        kind: "standard",
         name: "Project",
-        gitRemoteUrl: null,
         createdAt: 1,
         updatedAt: 1,
-        sources: [],
         threads: projectThreads,
-        defaultExecutionOptions: null,
-      },
+      }),
     ],
-    personalProject: {
+    personalProject: makeProjectWithThreadsResponse({
       id: "proj_personal",
       kind: "personal",
       name: "Personal",
-      gitRemoteUrl: null,
       createdAt: 1,
       updatedAt: 1,
-      sources: [],
       threads: personalThreads,
-      defaultExecutionOptions: null,
-    },
-  };
+    }),
+  });
 }
 
 function mockMatchMedia(matching: readonly string[]) {
@@ -157,24 +143,17 @@ beforeEach(() => {
     hostId: "host-1",
     storageRootPath: "/tmp/thread-storage/thread-1",
   });
-  vi.mocked(sdk.threads.timeline).mockResolvedValue({
-    rows: [],
-    activePromptMode: null,
-    activeThinking: null,
-    activeWorkflows: [],
-    activeBackgroundCommands: [],
-    pendingTodos: null,
-    goal: null,
-    modelFallback: null,
-    timelinePage: {
-      kind: "latest",
-      segmentLimit: 100,
-      returnedSegmentCount: 0,
-      hasOlderRows: false,
-      olderCursor: null,
-    },
-    maxSeq: 0,
-  } satisfies ThreadTimelineResponse);
+  vi.mocked(sdk.threads.timeline).mockResolvedValue(
+    makeThreadTimelineResponse({
+      timelinePage: {
+        kind: "latest",
+        segmentLimit: 100,
+        returnedSegmentCount: 0,
+        hasOlderRows: false,
+        olderCursor: null,
+      },
+    }),
+  );
   vi.mocked(api.getThreadHostFilePreview).mockResolvedValue({
     kind: "text",
     path: "/tmp/log.txt",
@@ -216,7 +195,7 @@ describe("useThreadDetailBootstrap", () => {
   });
 
   it("uses the cached timeline sequence and merges a prefetched delta", async () => {
-    const previousTimeline = {
+    const previousTimeline = makeThreadTimelineResponse({
       rows: [
         {
           id: "row-1",
@@ -233,13 +212,6 @@ describe("useThreadDetailBootstrap", () => {
           status: null,
         },
       ],
-      activePromptMode: null,
-      activeThinking: null,
-      activeWorkflows: [],
-      activeBackgroundCommands: [],
-      pendingTodos: null,
-      goal: null,
-      modelFallback: null,
       timelinePage: {
         kind: "latest",
         segmentLimit: 100,
@@ -248,7 +220,7 @@ describe("useThreadDetailBootstrap", () => {
         olderCursor: null,
       },
       maxSeq: 7,
-    } satisfies ThreadTimelineResponse;
+    });
     vi.mocked(sdk.threads.timeline).mockResolvedValueOnce({
       ...previousTimeline,
       rows: [],
@@ -372,6 +344,39 @@ describe("useThreadDetailBootstrap", () => {
 });
 
 describe("useArchivedThreads", () => {
+  it("fetches pages only while selected and continues from the loaded offset", async () => {
+    const { queryClient, wrapper } = createQueryClientTestHarness();
+    vi.mocked(sdk.threads.list)
+      .mockResolvedValueOnce(
+        Array.from({ length: ARCHIVED_THREADS_PAGE_SIZE }, (_, index) =>
+          makeThreadListEntry({
+            id: `archived-${index}`,
+            archivedAt: 1,
+          }),
+        ),
+      )
+      .mockResolvedValueOnce([]);
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useArchivedThreads({}, { enabled }),
+      { wrapper, initialProps: { enabled: false } },
+    );
+    expect(sdk.threads.list).not.toHaveBeenCalled();
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.hasNextPage).toBe(true));
+    await act(async () => {
+      await result.current.fetchNextPage();
+    });
+    expect(vi.mocked(sdk.threads.list).mock.calls[1]?.[0]?.offset).toBe(
+      ARCHIVED_THREADS_PAGE_SIZE,
+    );
+    await waitFor(() => expect(result.current.hasNextPage).toBe(false));
+    rerender({ enabled: false });
+    await act(async () => {
+      await queryClient.invalidateQueries();
+    });
+    expect(sdk.threads.list).toHaveBeenCalledTimes(2);
+  });
+
   it("loads archived threads across all projects when no scope is selected", async () => {
     const { wrapper } = createQueryClientTestHarness();
 
@@ -449,6 +454,11 @@ describe("useThreadQueuedMessages", () => {
 });
 
 describe("useThreadPendingInteractions", () => {
+  it("keeps cached empty interactions unknown while their refresh is pending", () => {
+    expect(isPendingInteractionStateUnknown([], true)).toBe(true);
+    expect(isPendingInteractionStateUnknown([], false)).toBe(false);
+  });
+
   it("reuses the first owner's fresh baseline when a second owner mounts", async () => {
     const { queryClient, wrapper } = createQueryClientTestHarness();
     const first = renderHook(() => useThreadPendingInteractions("thread-1"), {
@@ -844,4 +854,25 @@ describe("useThreadTimeline segment limit", () => {
       signal: expect.any(AbortSignal),
     });
   });
+});
+
+describe("palette lifecycle queries", () => {
+  it("loads bounded archived recents only while selected before typing", async () => {
+    const { wrapper } = createQueryClientTestHarness();
+    const archived = makeThreadListEntry({ id: "archived", archivedAt: 1 });
+    vi.mocked(sdk.threads.list).mockResolvedValue([archived]);
+    const { result, rerender } = renderHook(
+      ({ recent, selected }) => usePaletteRecentArchivedThreads({ enabled: recent && selected }),
+      { wrapper, initialProps: { recent: true, selected: false } },
+    );
+    expect(sdk.threads.list).not.toHaveBeenCalled();
+    rerender({ recent: false, selected: true });
+    expect(sdk.threads.list).not.toHaveBeenCalled();
+    rerender({ recent: true, selected: true });
+    await waitFor(() => expect(result.current.data).toEqual([archived]));
+    expect(sdk.threads.list).toHaveBeenCalledExactlyOnceWith({
+      archived: true, limit: 20, signal: expect.any(AbortSignal),
+    });
+  });
+
 });

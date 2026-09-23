@@ -52,9 +52,9 @@ import {
   subscribeAppUpdateCheck,
 } from "@/components/settings/app-update-check-store";
 import {
-  CHANGELOG_RELEASE_META,
   fetchLatestChangelogEntry,
   LATEST_CHANGELOG_ENTRY,
+  RELEASE_META,
   type ChangelogBlock,
 } from "@/components/settings/changelog-preview";
 import { appToast } from "@/components/ui/app-toast";
@@ -86,7 +86,10 @@ import {
   getSettingsRoutePath,
 } from "@/lib/route-paths";
 import { getProviderIconInfo } from "@/lib/provider-icon";
-import { useSystemProviders } from "@/hooks/queries/system-queries";
+import {
+  useSystemConfig,
+  useSystemProviders,
+} from "@/hooks/queries/system-queries";
 import { sdk } from "@/lib/sdk";
 import { rawStringLocalStorage } from "@/lib/browser-storage";
 
@@ -243,7 +246,6 @@ function RowVersions({
       {latest !== null && latest !== current ? (
         <>
           <span className="px-1">→</span>
-          {}
           <span className="font-semibold text-version-upgrade">{latest}</span>
         </>
       ) : null}
@@ -325,7 +327,6 @@ function RowStateControl({
   if (onClick !== undefined && buttonLabel !== undefined) {
     return (
       <span className="flex min-w-0 items-center gap-1.5">
-        {}
         <Button
           type="button"
           variant="outline"
@@ -398,7 +399,6 @@ function RowStateControl({
       <TooltipProvider delayDuration={250}>
         <Tooltip>
           <TooltipTrigger asChild>{mark}</TooltipTrigger>
-          {}
           <TooltipContent>{presentation.label}</TooltipContent>
         </Tooltip>
       </TooltipProvider>
@@ -547,7 +547,7 @@ export function ChangelogPreviewCard() {
   ) {
     return null;
   }
-  const releaseMeta = CHANGELOG_RELEASE_META[entry.version];
+  const releaseMeta = RELEASE_META[entry.version];
   const dismissalPhase =
     dismissal?.version === entry.version ? dismissal.phase : "visible";
   const releaseVisible = dismissalPhase === "visible";
@@ -562,48 +562,7 @@ export function ChangelogPreviewCard() {
           : "grid-rows-[1fr] translate-y-0 opacity-100",
       )}
     >
-      <SettingsSection
-        title={
-          <span
-            data-changelog-label
-            className="inline-flex rounded-sm border border-border bg-muted/40 px-2.5 py-1 text-xs font-medium leading-none text-muted-foreground"
-          >
-            What's new
-          </span>
-        }
-        action={
-          releaseVisible ? (
-            <Tooltip delayDuration={300} disableHoverableContent>
-              <TooltipTrigger asChild>
-                <Button
-                  data-changelog-dismiss
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="size-7 text-muted-foreground hover:text-foreground"
-                  aria-label={`Dismiss bb ${entry.version} changelog preview`}
-                  onClick={() => {
-                    rawStringLocalStorage.setItem(
-                      CHANGELOG_DISMISSED_VERSION_STORAGE_KEY,
-                      entry.version,
-                    );
-                    setDismissal({
-                      phase: "confirming",
-                      version: entry.version,
-                    });
-                  }}
-                >
-                  <Icon aria-hidden name="X" className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Dismiss</TooltipContent>
-            </Tooltip>
-          ) : (
-            <span aria-hidden className="block size-7" />
-          )
-        }
-        bodyClassName="p-0"
-      >
+      <section className="overflow-hidden rounded-lg border border-border bg-card">
         <div
           data-changelog-release-panel
           aria-hidden={!releaseVisible}
@@ -616,21 +575,66 @@ export function ChangelogPreviewCard() {
         >
           <div className="min-h-0 overflow-hidden">
             <article data-changelog-preview className="min-w-0 p-4 sm:p-5">
-              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                <span
-                  data-changelog-version={entry.version}
-                  className="inline-flex rounded-full border border-border bg-muted/30 px-2.5 py-1 font-mono text-xs font-semibold leading-none tracking-tight text-foreground"
-                >
-                  {entry.version}
-                </span>
-                {releaseMeta === undefined ? null : (
+              <div
+                data-changelog-header
+                className="flex min-w-0 items-center justify-between gap-4"
+              >
+                <h2 className="min-w-0">
+                  <span
+                    data-changelog-label
+                    className="inline-flex rounded-sm border border-border bg-muted/40 px-2.5 py-1 text-xs font-medium leading-none text-muted-foreground"
+                  >
+                    What's new
+                  </span>
+                </h2>
+                {releaseVisible ? (
+                  <Tooltip delayDuration={300} disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <Button
+                        data-changelog-dismiss
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="size-7 text-muted-foreground hover:text-foreground"
+                        aria-label={`Dismiss bb ${entry.version} changelog preview`}
+                        onClick={() => {
+                          rawStringLocalStorage.setItem(
+                            CHANGELOG_DISMISSED_VERSION_STORAGE_KEY,
+                            entry.version,
+                          );
+                          setDismissal({
+                            phase: "confirming",
+                            version: entry.version,
+                          });
+                        }}
+                      >
+                        <Icon aria-hidden name="X" className="size-3.5" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">Dismiss</TooltipContent>
+                  </Tooltip>
+                ) : null}
+              </div>
+              {releaseMeta === undefined ? null : (
+                <div className="mt-4 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  <span
+                    data-changelog-version={entry.version}
+                    className="inline-flex rounded-full border border-border bg-muted/30 px-2.5 py-1 font-mono text-xs font-semibold leading-none tracking-tight text-foreground"
+                  >
+                    {entry.version}
+                  </span>
                   <span className="text-xs text-muted-foreground">
                     {releaseMeta.date}
                   </span>
-                )}
-              </div>
+                </div>
+              )}
 
-              <div className="relative mt-3 min-w-0">
+              <div
+                className={cn(
+                  "relative min-w-0",
+                  releaseMeta === undefined ? "mt-4" : "mt-3",
+                )}
+              >
                 <div
                   ref={releaseBodyRef}
                   data-changelog-release-scroll
@@ -713,7 +717,7 @@ export function ChangelogPreviewCard() {
             </div>
           </div>
         </div>
-      </SettingsSection>
+      </section>
     </div>
   );
 }
@@ -1007,11 +1011,13 @@ export function ProviderCliCheckRow({
 
 function providerRowState({
   issue,
+  status,
 }: {
   issue: ProviderCliIssue | null;
+  status: ProviderCliStatusEntry["status"];
 }): UpdateState | null {
   if (issue === null) {
-    return "up-to-date";
+    return status.latestVersion === null ? "latest-unknown" : "up-to-date";
   }
   if (issue.action === null) {
     return "update-manually";
@@ -1043,7 +1049,7 @@ export function MachineUpdatesRows({
 
   const rows = providerEntries.map(({ provider, status }) => {
     const issue = issuesByProvider.get(provider) ?? null;
-    const state = providerRowState({ issue });
+    const state = providerRowState({ issue, status });
     const jobKey = providerCliJobKey(host.id, provider);
     const running = runningJobKey === jobKey;
     const queued = queuedJobKeys.has(jobKey);
@@ -1059,6 +1065,7 @@ export function MachineUpdatesRows({
       (candidate) => candidate.id === providerId,
     );
     const ProviderIcon = getProviderIconInfo(
+      "agent",
       providerId,
       providerInfo ?? null,
     )?.icon;
@@ -1150,12 +1157,12 @@ export function MachineUpdatesRows({
 export function MachineUpdatesSection({
   machine,
   isThisMachine,
-  action,
+  showServerBadge,
   children,
 }: {
   machine: UpdateInventoryMachine;
   isThisMachine: boolean;
-  action?: ReactNode;
+  showServerBadge: boolean;
   children: ReactNode;
 }) {
   return (
@@ -1173,18 +1180,33 @@ export function MachineUpdatesSection({
               {isThisMachine ? (
                 <SettingsBadge>This machine</SettingsBadge>
               ) : null}
+              {showServerBadge ? <SettingsBadge>Server</SettingsBadge> : null}
             </span>
-          }
-          action={
-            action === undefined ? undefined : (
-              <div className="pr-4">{action}</div>
-            )
           }
         >
           <SettingsRowList>{children}</SettingsRowList>
         </SettingsSection>
       </div>
     </div>
+  );
+}
+
+export function MachineUpdatesFleetSection({
+  action,
+  children,
+}: {
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <SettingsSection
+      action={action}
+      bodyClassName="border-0 bg-transparent p-0"
+      description="Manage bb and provider CLI updates across all machines."
+      title="Machine updates"
+    >
+      <div className="space-y-6 pt-1.5">{children}</div>
+    </SettingsSection>
   );
 }
 
@@ -1208,6 +1230,7 @@ export function UpdatesSettingsSection({
   const navigate = useNavigate();
   const inventory = useUpdateInventory();
   const { localDaemonHostId } = useHostDaemon();
+  const serverPrimaryHostId = useSystemConfig().data?.primaryHostId ?? null;
   const { desktopApi, desktopInfo, isDesktop } = useDesktopUpdateInfo();
   const retryHostUpdate = useRetryHostUpdate();
   const isChecking = useSyncExternalStore(
@@ -1366,97 +1389,100 @@ export function UpdatesSettingsSection({
     <div className="space-y-6">
       {showChangelogPreview ? <ChangelogPreviewCard /> : null}
 
-      {visibleMachines.length === 0 ? (
-        <ResourceListState state="empty" message="No machines available." />
-      ) : (
-        visibleMachines.map((machine, index) => {
-          const ownsApp = machine.host.id === appMachine?.host.id;
-          const showDaemon =
-            machine.canRetryDaemonUpdate || machine.host.status !== "connected";
-          return (
-            <MachineUpdatesSection
-              key={machine.host.id}
-              machine={machine}
-              isThisMachine={
-                inventory.machines.length > 1 &&
-                machine.host.id === localDaemonHostId
-              }
-              action={index === 0 ? bulkActions : null}
-            >
-              {ownsApp ? (
-                <BbAppUpdateRows
-                  systemVersion={inventory.systemVersion}
-                  desktopInfo={desktopInfo}
-                  isDesktop={isDesktop}
-                  isChecking={isChecking}
-                  onRelaunchDesktop={
-                    desktopApi === null || showFallbackBbStatus
-                      ? null
-                      : () => {
-                          void desktopApi.installUpdate().catch((error) => {
-                            appToast.error("Relaunch failed", {
-                              description: checkErrorDescription(error),
-                            });
-                          });
-                        }
-                  }
-                  onRetryDesktop={
-                    desktopApi === null || showFallbackBbStatus
-                      ? null
-                      : () => {
-                          void desktopApi.checkForUpdates().catch((error) => {
-                            appToast.error("Update retry failed", {
-                              description: checkErrorDescription(error),
-                            });
-                          });
-                        }
-                  }
-                />
-              ) : null}
-              {showDaemon ? (
-                <BbDaemonUpdateRow
-                  machine={machine}
-                  now={now}
-                  retryUpdatePending={
-                    retryHostUpdate.isPending &&
-                    retryHostUpdate.variables === machine.host.id
-                  }
-                  onRetryDaemonUpdate={retryDaemonUpdate}
-                  onOpenMachine={(hostId) =>
-                    navigate(getSettingsMachineRoutePath(hostId))
-                  }
-                />
-              ) : null}
-              {machine.statusError ? (
-                <ProviderCliCheckRow
-                  machine={machine}
-                  onRecheckClis={(hostId) => {
-                    void invalidateHostProviderCliStatus({
-                      queryClient,
-                      hostId,
-                    });
-                  }}
-                  onOpenMachine={(hostId) =>
-                    navigate(getSettingsMachineRoutePath(hostId))
-                  }
-                />
-              ) : null}
-              <MachineUpdatesRows
+      <MachineUpdatesFleetSection action={bulkActions}>
+        {visibleMachines.length === 0 ? (
+          <ResourceListState state="empty" message="No machines available." />
+        ) : (
+          visibleMachines.map((machine) => {
+            const ownsApp = machine.host.id === appMachine?.host.id;
+            const showDaemon =
+              machine.canRetryDaemonUpdate ||
+              machine.host.status !== "connected";
+            return (
+              <MachineUpdatesSection
+                key={machine.host.id}
                 machine={machine}
-                runningJobKey={runningJobKey}
-                queuedJobKeys={queuedJobKeys}
-                failuresByJobKey={failuresByJobKey}
-                onStartInstall={(hostId, issue) =>
-                  startInstall({ hostId, issue })
+                isThisMachine={
+                  inventory.machines.length > 1 &&
+                  machine.host.id === localDaemonHostId
                 }
-                onOpenProvider={() =>
-                  navigate(getSettingsRoutePath("providers"))
-                }
-              />
-            </MachineUpdatesSection>
-          );
-        })
-      )}
+                showServerBadge={machine.host.id === serverPrimaryHostId}
+              >
+                {ownsApp ? (
+                  <BbAppUpdateRows
+                    systemVersion={inventory.systemVersion}
+                    desktopInfo={desktopInfo}
+                    isDesktop={isDesktop}
+                    isChecking={isChecking}
+                    onRelaunchDesktop={
+                      desktopApi === null || showFallbackBbStatus
+                        ? null
+                        : () => {
+                            void desktopApi.installUpdate().catch((error) => {
+                              appToast.error("Relaunch failed", {
+                                description: checkErrorDescription(error),
+                              });
+                            });
+                          }
+                    }
+                    onRetryDesktop={
+                      desktopApi === null || showFallbackBbStatus
+                        ? null
+                        : () => {
+                            void desktopApi.checkForUpdates().catch((error) => {
+                              appToast.error("Update retry failed", {
+                                description: checkErrorDescription(error),
+                              });
+                            });
+                          }
+                    }
+                  />
+                ) : null}
+                {showDaemon ? (
+                  <BbDaemonUpdateRow
+                    machine={machine}
+                    now={now}
+                    retryUpdatePending={
+                      retryHostUpdate.isPending &&
+                      retryHostUpdate.variables === machine.host.id
+                    }
+                    onRetryDaemonUpdate={retryDaemonUpdate}
+                    onOpenMachine={(hostId) =>
+                      navigate(getSettingsMachineRoutePath(hostId))
+                    }
+                  />
+                ) : null}
+                {machine.statusError ? (
+                  <ProviderCliCheckRow
+                    machine={machine}
+                    onRecheckClis={(hostId) => {
+                      void invalidateHostProviderCliStatus({
+                        queryClient,
+                        hostId,
+                      });
+                    }}
+                    onOpenMachine={(hostId) =>
+                      navigate(getSettingsMachineRoutePath(hostId))
+                    }
+                  />
+                ) : null}
+                <MachineUpdatesRows
+                  machine={machine}
+                  runningJobKey={runningJobKey}
+                  queuedJobKeys={queuedJobKeys}
+                  failuresByJobKey={failuresByJobKey}
+                  onStartInstall={(hostId, issue) =>
+                    startInstall({ hostId, issue })
+                  }
+                  onOpenProvider={() =>
+                    navigate(getSettingsRoutePath("providers"))
+                  }
+                />
+              </MachineUpdatesSection>
+            );
+          })
+        )}
+      </MachineUpdatesFleetSection>
     </div>
   );
 }

@@ -22,6 +22,8 @@ import {
   AppShellWireframe,
   CommandPaletteWireframe,
   RealComposerAnnotated,
+  SettingsWireframe,
+  ExtensionsPluginPageWireframe,
   SurfaceMapContext,
   type SurfaceMapState,
 } from "../src/wireframes";
@@ -30,7 +32,6 @@ const mapState: SurfaceMapState = {
   activeId: null,
   setActiveId: vi.fn(),
   expandedId: null,
-  spotlightId: null,
   numberOf: (id) => SURFACE_NUMBERS.get(id) ?? null,
 };
 
@@ -44,6 +45,26 @@ function renderWireframe(
 }
 
 describe("guide fixture boundaries", () => {
+  it("keeps configuration and recovery fixtures tied to current app source", () => {
+    for (const [id, component] of [
+      ["declarative-settings", SettingsWireframe],
+      ["plugin-status", ExtensionsPluginPageWireframe],
+    ] as const) {
+      const contract = anatomy.surfaceFixtures[id];
+      const markup = renderWireframe(createElement(component));
+      for (const label of contract.labels.anchor)
+        expect(markup).toContain(label);
+      for (const source of contract.sources) {
+        const text = readFileSync(
+          join(import.meta.dirname, "../../..", source.path),
+          "utf8",
+        );
+        for (const anchor of source.anchors)
+          expect(text, source.path).toContain(anchor);
+      }
+    }
+  });
+
   it("scales every spatial fixture together and reflows only the capability grid", () => {
     const markup = renderToStaticMarkup(createElement(ProductMap));
 
@@ -82,28 +103,14 @@ describe("guide fixture boundaries", () => {
   it("scrolls only the one-line page list and clips off-stage fixture overflow", () => {
     const markup = renderToStaticMarkup(createElement(ProductMap));
 
-    expect(markup).toContain(
-      "overflow-x-clip transition-[height] duration-300 ease-out",
-    );
-    expect(markup).toContain("mx-auto flex w-fit max-w-full items-center");
+    expect(markup).toContain("w-full overflow-x-clip");
+    expect(markup).toContain("data-guide-navigation-toolbar");
     expect(markup).toContain("data-guide-page-list-scroll");
     expect(markup).toContain("min-w-0 overflow-x-auto");
     expect(markup).toContain("w-max flex-nowrap");
     expect(markup).toContain("min-w-0 w-full shrink-0 self-start px-1 pt-2");
     expect(markup).not.toContain("flex flex-wrap items-center justify-center");
     expect(markup).not.toContain("min-w-full flex-nowrap");
-  });
-
-  it("does not reserve the full header gap when the compact plugin page omits its header", () => {
-    const compactMarkup = renderToStaticMarkup(createElement(ProductMap));
-    const headedMarkup = renderToStaticMarkup(
-      createElement(ProductMap, {
-        header: createElement("h1", null, "Plugin surfaces"),
-      }),
-    );
-
-    expect(compactMarkup).toContain('class="mt-2"');
-    expect(headedMarkup).toContain('class="mt-8"');
   });
 
   it("never nests one annotation link inside another", () => {
@@ -150,7 +157,12 @@ describe("guide fixture boundaries", () => {
     expect(tabStrip).not.toContain("items-end");
     expect(tabStrip).not.toContain("pb-2");
     expect(tabStrip).not.toContain("data-guide-badge=");
-    for (const id of ["thread-panel", "file-opener", "code-renderers"]) {
+    for (const id of [
+      "browser-toolbar",
+      "thread-panel",
+      "file-opener",
+      "code-renderers",
+    ]) {
       expect(appMarkup).toMatch(
         new RegExp(
           `data-guide-badge="${id}"[\\s\\S]*?data-guide-badge-placement="lane"`,
@@ -199,6 +211,9 @@ describe("guide fixture boundaries", () => {
       /data-guide-badge="nav-panel"[\s\S]*?data-guide-badge-placement="start"/,
     );
     expect(markup).toMatch(
+      /data-guide-badge="sidebar-navigation"[^>]*data-guide-badge-placement="start"[^>]*data-guide-badge-align="start"/,
+    );
+    expect(markup).toMatch(
       /data-guide-badge="thread-list"[\s\S]*?data-guide-badge-placement="start"/,
     );
     expect(markup).toMatch(
@@ -210,6 +225,18 @@ describe("guide fixture boundaries", () => {
     expect(markup).toMatch(
       /data-guide-target="content-scripts"[^>]*class="[^"]*absolute inset-0/,
     );
+  });
+
+  it("keeps nested sidebar targets reachable and the thread-header badge outside its control", () => {
+    const markup = renderWireframe(createElement(AppShellWireframe));
+
+    expect(markup).toMatch(
+      /data-guide-region="nav-panel"[^>]*class="[^"]*z-\[2\][^"]*block/,
+    );
+    expect(markup).toMatch(
+      /data-guide-badge="thread-header"[^>]*data-guide-badge-placement="above"/,
+    );
+    expect(markup.match(/data-guide-badge="thread-header"/g)).toHaveLength(1);
   });
 
   it("keeps the sidebar trigger in app-owned overlay chrome", () => {
@@ -227,6 +254,26 @@ describe("guide fixture boundaries", () => {
     expect(markup.slice(reserveStart, reserveEnd)).not.toContain(
       'data-guide-fixture="sidebar-trigger-overlay"',
     );
+  });
+
+  it("shows the app-wide plugin overlay above the host layout", () => {
+    const markup = renderWireframe(createElement(AppShellWireframe));
+    const contract = anatomy.surfaceFixtures["app-overlay"];
+
+    expect(contract.requiredStates).toEqual(["anchor"]);
+    for (const label of contract.labels.anchor) {
+      expect(markup).toContain(label);
+    }
+    for (const classAnchor of contract.fixtureClassAnchors) {
+      expect(markup, `missing fixture class ${classAnchor}`).toContain(
+        classAnchor,
+      );
+    }
+    const overlayClasses = markup.match(
+      /data-guide-region="app-overlay"[^>]*class="([^"]*)"/,
+    )?.[1].split(" ");
+    expect(overlayClasses).toEqual(expect.arrayContaining(["absolute", "z-[6]", "shadow-md"]));
+    expect(markup.match(/data-guide-badge="app-overlay"/g)).toHaveLength(1);
   });
 
   it("shows the complete sidebar navigation replacement boundary", () => {
@@ -249,6 +296,13 @@ describe("guide fixture boundaries", () => {
       'data-guide-fixture="sidebar-navigation-primary-actions"',
     );
     expect(markup).not.toContain("Custom navigation");
+    const pluginRowStart = markup.indexOf('data-guide-region="nav-panel"');
+    const pluginRowEnd = markup.indexOf("</a>", pluginRowStart);
+    const pluginRow = markup.slice(pluginRowStart, pluginRowEnd);
+    expect(pluginRow).toContain("Your panel");
+    expect(pluginRow).not.toContain("Plugins");
+    expect(pluginRow).not.toContain("Skills");
+    expect(markup).not.toContain('class="sr-only">Search threads');
   });
 
   it("grows the app window within capped viewport-fit bounds while retaining loose timeline spacing", () => {
@@ -267,6 +321,7 @@ describe("guide fixture boundaries", () => {
   });
 
   it.each([
+    ["browser-toolbar", "browser-toolbar", "https://example.com"],
     ["thread-panel", "thread-panel", "Release checklist"],
     ["file-opener", "file-viewer", "Checkout retry notes"],
     ["code-renderers", "diff-renderer", "checkout.test.ts"],

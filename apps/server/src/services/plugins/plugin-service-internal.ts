@@ -1,17 +1,19 @@
+import type { MachineEnrollmentService } from "../machines/machine-services.js";
 import type { AiServiceRegistry } from "../ai/ai-service-registry.js";
 import type { DbConnection } from "@bb/db";
 import type {
   DynamicTool,
+  PendingInteraction,
   Thread,
   ThreadQueuedMessage,
 } from "@bb/domain";
-import type { HostDaemonConnectTunnelIdentity } from "@bb/host-daemon-contract";
-import {
-  pluginUpdateCheckEntrySchema,
-  type InstalledPlugin,
-  type PluginApplyUpdateResult,
-  type PluginRuntimeStatus,
-  type PluginSourceDetail,
+import type {
+  HostDaemonConnectTunnelIdentity,
+  HostDaemonContributedEnvEntry,
+} from "@bb/host-daemon-contract";
+import type {
+  PluginApplyUpdateResult,
+  PluginRuntimeStatus,
 } from "@bb/server-contract";
 import type { ServerLogger } from "../../types.js";
 import type { TelemetryService } from "../system/telemetry.js";
@@ -26,15 +28,8 @@ import type {
 import type { HostSharedPortCoordinator } from "../../ws/host-shared-ports.js";
 import type { ProviderRegistryService } from "../providers/provider-registry.js";
 import type { PluginHostArtifactRegistry } from "./plugin-host-artifact-registry.js";
-export type {
-  PluginHandlerStats,
-  PluginRuntimeStatus,
-  PluginUpdateCheckEntry,
-} from "@bb/server-contract";
 
 type PluginServiceState = "running" | "backoff" | "stopped";
-
-export type PluginListEntry = InstalledPlugin;
 
 export interface ServiceRuntime {
   record: PluginBackgroundServiceRecord;
@@ -61,6 +56,7 @@ export interface PluginHostArtifactSnapshot {
 }
 
 export interface PluginServiceDeps {
+  machineEnrollments?: MachineEnrollmentService;
   db: DbConnection;
   sharedPorts?: Pick<
     HostSharedPortCoordinator,
@@ -89,8 +85,6 @@ export interface PluginServiceDeps {
    * drove this signal itself and no app had registered a listener.
    */
   requestQueueDrain?: () => void;
-  /** Per-handler hook decision box; tests shrink it to exercise the timeout path. */
-  pluginHookTimeoutMs?: number;
   /** Thread DTO assembly for lifecycle events + plugin-signal broadcast +
    * the `plugins-changed` system broadcast on lifecycle completion. */
   hub: Pick<
@@ -105,15 +99,19 @@ export interface PluginServiceDeps {
     | "interruptPluginInteractions"
     | "setPluginDirectory"
   >;
+  getAppUrl?: () => string | null;
   dataDir: string;
   appVersion: string;
   bundledPlugins?: readonly BundledPluginRegistration[];
   watchBuiltinPluginSources?: boolean;
   loadTimeoutMs?: number;
+  /** How long an install waits for `bb.onInstall` handlers. Defaults to 30s. */
+  installHandlerTimeoutMs?: number;
   serviceStopTimeoutMs?: number;
   serviceRestartBaseMs?: number;
   mentionSearchTimeoutMs?: number;
   mentionResolveTimeoutMs?: number;
+  providerEnvResolveTimeoutMs?: number;
   stabilizationWindowMs?: number;
   artifactRetentionMs?: number;
   now?: () => number;
@@ -121,7 +119,10 @@ export interface PluginServiceDeps {
     durationMs: number,
     onElapsed: () => void,
   ) => () => void;
-  scheduleUpdateCheck?: (delayMs: number, onElapsed: () => void) => () => void;
+  scheduleUpdateCheck?: (
+    delayMs: number,
+    onElapsed: () => Promise<void>,
+  ) => () => void;
   afterPluginRollbackStateRestored?: (args: {
     pluginId: string;
     snapshotId: string;
@@ -165,6 +166,15 @@ export interface PluginResolvedAgentConfiguration {
   dynamicInstructions: Array<{ pluginId: string; text: string }>;
 }
 
+export interface PluginResolvedProviderEnv {
+  entries: HostDaemonContributedEnvEntry[];
+}
+
+export interface PluginResolvedProviderEnvHealth {
+  label: string;
+  statusMessage: string;
+}
+
 export interface PluginMentionProviderContribution {
   pluginId: string;
   id: string;
@@ -187,16 +197,29 @@ export interface PluginMentionSearchGroup {
 }
 
 export type PluginMentionResolveResult =
-  | { ok: true; context: string }
+  | {
+      ok: true;
+      context: string;
+      images: Array<
+        | { type: "image"; url: string; context?: string }
+        | { type: "localImage"; path: string; context?: string }
+      >;
+    }
   | { ok: false; error: string };
 
 export interface PluginThreadEventEmitter {
+  emitThreadEvents(threadId: string): void;
+  emitTerminalInput(
+    terminal: import("@bb/server-contract").TerminalSession,
+  ): void;
   emitThreadCreated(thread: Thread): void;
   emitThreadActive(thread: Thread): void;
   emitThreadIdle(thread: Thread): void;
   emitThreadFailed(thread: Thread): void;
   emitThreadArchived(thread: Thread): void;
+  emitThreadUnarchived(thread: Thread): void;
   emitThreadDeleted(thread: Thread): void;
+  emitInteractionPending(thread: Thread, interaction: PendingInteraction): void;
   /**
    * Queue lifecycle. The row is already in its new state when these fire; the
    * DTO is built once and shared by every listener, exactly like the thread
@@ -204,6 +227,7 @@ export interface PluginThreadEventEmitter {
    */
   emitMessageQueued(entry: ThreadQueuedMessage): void;
   emitMessageDispatched(entry: ThreadQueuedMessage): void;
+  emitMessageCancelled(entry: ThreadQueuedMessage): void;
   /**
    * A turn on this thread failed and the thread has already landed in `error`.
    * Takes the id alone: the payload is read from the failed turn's own records,
@@ -221,9 +245,6 @@ export type PluginWireLookup<T> =
     }
   | { outcome: "not-found" }
   | { outcome: "found"; value: T };
-
-export { pluginUpdateCheckEntrySchema };
-export type PluginSourceView = PluginSourceDetail;
 
 export type PluginApplyUpdateOutcome =
   | { ok: true; result: PluginApplyUpdateResult }

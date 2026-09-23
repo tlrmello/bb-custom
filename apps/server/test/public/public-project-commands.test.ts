@@ -165,6 +165,7 @@ describe("public project command typeahead route", () => {
         const { host, session } = seedHostSession(harness.deps, {
           id: "host-shared-skills",
         });
+        seedPrimaryHost(harness.deps, host.id);
         const { project } = seedProjectWithSource(harness.deps, {
           hostId: host.id,
           path: "/tmp/shared-skills",
@@ -234,6 +235,7 @@ describe("public project command typeahead route", () => {
         const { host, session } = seedHostSession(harness.deps, {
           id: "host-custom-acp-skills",
         });
+        seedPrimaryHost(harness.deps, host.id);
         const { project } = seedProjectWithSource(harness.deps, {
           hostId: host.id,
           path: "/tmp/custom-acp-skills",
@@ -276,6 +278,7 @@ describe("public project command typeahead route", () => {
       const { host, session } = seedHostSession(harness.deps, {
         id: "host-commands-resolving",
       });
+      seedPrimaryHost(harness.deps, host.id);
       const { project } = seedProjectWithSource(harness.deps, {
         hostId: host.id,
         path: "/tmp/resolving-project",
@@ -311,11 +314,13 @@ describe("public project command typeahead route", () => {
       expect(response.status).toBe(200);
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands.map((command) => command.name)).toEqual([
+        "clear",
         "vendor:review",
       ]);
       expect(stub.resolveRequests.map((request) => request.command)).toEqual([
         expect.objectContaining({
           type: "plugin.host.call",
+          contributedEnv: [],
           pluginId: provider.pluginId,
           method: "resolveNativeRoots",
           input: { providerId: "resolving", cwd: "/tmp/resolving-project" },
@@ -374,6 +379,7 @@ describe("public project command typeahead route", () => {
       const { host, session } = seedHostSession(harness.deps, {
         id: "host-commands-slow-resolver",
       });
+      seedPrimaryHost(harness.deps, host.id);
       const { project } = seedProjectWithSource(harness.deps, {
         hostId: host.id,
         path: "/tmp/slow-resolver-project",
@@ -396,6 +402,7 @@ describe("public project command typeahead route", () => {
       expect(response.status).toBe(200);
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands.map((command) => command.name)).toEqual([
+        "clear",
         "after-the-wait",
       ]);
       const resolverCommand = stub.resolveRequests[0]?.command;
@@ -432,6 +439,7 @@ describe("public project command typeahead route", () => {
         const { host, session } = seedHostSession(harness.deps, {
           id: "host-commands-rootless",
         });
+        seedPrimaryHost(harness.deps, host.id);
         const { project } = seedProjectWithSource(harness.deps, {
           hostId: host.id,
           path: "/tmp/rootless-project",
@@ -556,6 +564,13 @@ describe("public project command typeahead route", () => {
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands).toEqual([
         {
+          name: "clear",
+          source: "command",
+          origin: "builtin",
+          description: "Start fresh context in this thread",
+          argumentHint: null,
+        },
+        {
           name: "compact",
           source: "command",
           origin: "builtin",
@@ -636,6 +651,7 @@ describe("public project command typeahead route", () => {
       expect(response.status).toBe(200);
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands.map((command) => command.name)).toEqual([
+        "clear",
         "compact",
         "prd",
         "skill-installer",
@@ -683,6 +699,7 @@ describe("public project command typeahead route", () => {
         expect(response.status).toBe(200);
         const body = commandListResponseSchema.parse(await readJson(response));
         expect(body.commands.map((command) => command.name)).toEqual([
+          "clear",
           "compact",
           "stories",
         ]);
@@ -730,6 +747,7 @@ describe("public project command typeahead route", () => {
       expect(response.status).toBe(200);
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands.map((command) => command.name)).toEqual([
+        "clear",
         "compact",
         "alpha-review-notes",
         "ottonomous:review",
@@ -793,6 +811,7 @@ describe("public project command typeahead route", () => {
       expect(response.status).toBe(200);
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands.map((command) => command.name)).toEqual([
+        "clear",
         "compact",
         "bb-cli",
       ]);
@@ -828,6 +847,7 @@ describe("public project command typeahead route", () => {
       expect(response.status).toBe(200);
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands.map((command) => command.name)).toEqual([
+        "clear",
         "compact",
         "user-only",
       ]);
@@ -872,6 +892,7 @@ describe("public project command typeahead route", () => {
       expect(response.status).toBe(200);
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands.map((command) => command.name)).toEqual([
+        "clear",
         "compact",
         "user-only",
       ]);
@@ -911,6 +932,7 @@ describe("public project command typeahead route", () => {
       expect(response.status).toBe(200);
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands.map((command) => command.name)).toEqual([
+        "clear",
         "compact",
         "user-only",
       ]);
@@ -945,6 +967,7 @@ describe("public project command typeahead route", () => {
       expect(response.status).toBe(200);
       const body = commandListResponseSchema.parse(await readJson(response));
       expect(body.commands.map((command) => command.name)).toEqual([
+        "clear",
         "compact",
         "home-skill",
       ]);
@@ -1015,6 +1038,7 @@ describe("public project command typeahead route", () => {
         await readJson(fullResponse),
       );
       expect(full.commands.map((command) => command.name)).toEqual([
+        "clear",
         "compact",
         "alpha",
         "bravo",

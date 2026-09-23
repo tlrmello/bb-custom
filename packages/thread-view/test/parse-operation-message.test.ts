@@ -3,16 +3,19 @@ import type {
   OwnershipChangeOperationAction,
   SystemThreadInterruptedReason,
   SystemThreadProvisioningStatus,
+  ThreadEvent,
   ThreadEventRow,
 } from "@bb/domain";
-import { decodeThreadEventRow } from "../src/event-decode.js";
 import {
   finalizeOperationMessage,
   interruptOperationMessage,
   parseOperationMessage,
 } from "../src/parse-operation-message.js";
 import type { EventProjectionOperationMessage } from "../src/event-projection-types.js";
-import { createTimelineEventFactory } from "./timeline-test-harness.js";
+import {
+  createTimelineEventFactory,
+  decodeThreadEventRow,
+} from "./timeline-test-harness.js";
 
 const THREAD_ID = "thr_fixauth";
 const THREAD_NAME = "Fix auth bug";
@@ -73,6 +76,42 @@ function ownershipTitle(
 }
 
 describe("parseOperationMessage operation titles", () => {
+  it("renders provider environment provenance without revealing masked values", () => {
+    const event: ThreadEvent = {
+      type: "provider.env-resolved",
+      threadId: THREAD_ID,
+      providerThreadId: "provider-thread-1",
+      scope: { kind: "thread" },
+      entries: [
+        {
+          name: "PLUGIN_TOKEN",
+          source: { plugin: "auth-proxy" },
+          value: { masked: true },
+          reason: "Authenticate provider traffic",
+        },
+      ],
+    };
+    const message = parseOperationMessage(
+      event,
+      {
+        id: "event-provider-env",
+        seq: 1,
+        createdAt: 1,
+      },
+      { includeDiagnosticOperations: true, threadName: "" },
+    );
+
+    expect(
+      parseOperationMessage(event, { id: "hidden", seq: 1, createdAt: 1 }),
+    ).toBeNull();
+    expect(message).toMatchObject({
+      kind: "operation",
+      title: "Provider environment resolved",
+      detail:
+        "PLUGIN_TOKEN=•••••• (auth-proxy) — Authenticate provider traffic",
+    });
+  });
+
   describe("provider-unhandled", () => {
     it("uses the projected provider display name for dynamic providers", () => {
       const row = factory().providerUnhandled({
@@ -80,7 +119,7 @@ describe("parseOperationMessage operation titles", () => {
       });
       const { event, meta } = decodeThreadEventRow(row);
       const message = parseOperationMessage(event, meta, {
-        includeProviderUnhandledOperations: true,
+        includeDiagnosticOperations: true,
         providerDisplayName: "My Agent",
         threadName: THREAD_NAME,
       });
@@ -97,7 +136,7 @@ describe("parseOperationMessage operation titles", () => {
       });
       const { event, meta } = decodeThreadEventRow(row);
       const message = parseOperationMessage(event, meta, {
-        includeProviderUnhandledOperations: true,
+        includeDiagnosticOperations: true,
         threadName: THREAD_NAME,
       });
 
@@ -145,6 +184,26 @@ describe("parseOperationMessage operation titles", () => {
           "host-connection-lost",
         ),
       ).toBe("Stopped — connection to host was lost");
+    });
+  });
+
+  it("renders a context clear as a concise completed boundary", () => {
+    const row = factory().systemOperation({
+      operation: "context_clear",
+      status: "completed",
+      message:
+        "New prompts won’t include messages above. Thread history and workspace are unchanged.",
+    });
+    const { event, meta } = decodeThreadEventRow(row);
+
+    expect(
+      parseOperationMessage(event, meta, { threadName: THREAD_NAME }),
+    ).toMatchObject({
+      kind: "operation",
+      title: "Context cleared",
+      detail:
+        "New prompts won’t include messages above. Thread history and workspace are unchanged.",
+      status: "completed",
     });
   });
 

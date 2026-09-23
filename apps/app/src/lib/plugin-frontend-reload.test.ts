@@ -38,6 +38,7 @@ import { PluginSlotMount } from "@/components/plugin/PluginSlotMount";
 import { PLUGIN_PANEL_ROUTE_PATH } from "./route-paths";
 import { applyAppThemeCss } from "./themes";
 import { PluginPanelView } from "@/views/PluginPanelView";
+import { makeInstalledPlugin } from "@/test/fixtures/plugins";
 
 function candidate(
   pluginId: string,
@@ -78,6 +79,7 @@ function contentScriptModule(
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   resetPluginThreadRowStatusesForTest();
   resetPluginSlotStoreForTest();
@@ -114,8 +116,8 @@ function makeDeps(initial: PluginFrontendCandidate[] = []): TestReconcileDeps {
     fetchCandidates: vi.fn(
       async (): Promise<PluginFrontendCandidate[]> => initial,
     ),
-    importModule: vi.fn(
-      async (_url: string): Promise<unknown> => pluginModule("hello"),
+    importModule: vi.fn(async (_url: string): Promise<unknown> =>
+      pluginModule("hello"),
     ),
     applyCss: vi.fn(),
     retainCss: vi.fn(() => vi.fn()),
@@ -130,6 +132,40 @@ function makeDeps(initial: PluginFrontendCandidate[] = []): TestReconcileDeps {
 }
 
 describe("reconcilePluginFrontends", () => {
+  it.each(["running", "needs-configuration", "degraded"] as const)(
+    "loads frontend candidates for a plugin with %s status",
+    async (status) => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                plugins: [
+                  makeInstalledPlugin({
+                    id: "account-pool",
+                    status,
+                    app: {
+                      hasApp: true,
+                      bundle: candidate("account-pool", "v1").bundle,
+                    },
+                  }),
+                ],
+              }),
+              { headers: { "content-type": "application/json" } },
+            ),
+        ),
+      );
+
+      await expect(fetchFrontendCandidates(queryClient)).resolves.toEqual([
+        candidate("account-pool", "v1"),
+      ]);
+    },
+  );
+
   it("re-imports a plugin exactly once when its bundle hash changes, replacing registrations wholesale", async () => {
     const state = createPluginFrontendReconcileState();
     const deps = makeDeps([
@@ -272,7 +308,11 @@ describe("reconcilePluginFrontends", () => {
             null,
             createElement(Route, {
               path: PLUGIN_PANEL_ROUTE_PATH,
-              element: createElement(PluginPanelView),
+              element: createElement(PluginPanelView, {
+                pluginId: "hello",
+                panelPath: "panel",
+                subPath: "notes/today.md",
+              }),
             }),
           ),
         ),
@@ -504,6 +544,27 @@ describe("reconcilePluginFrontends", () => {
     });
     expect(deps.removeRegistrations).not.toHaveBeenCalled();
     expect(state.appliedHashes.has("hello")).toBe(false);
+  });
+
+  it("uses a fresh module URL when retrying a failed unchanged bundle", async () => {
+    const state = createPluginFrontendReconcileState();
+    const deps = makeDeps([candidate("hello", "v1")]);
+    deps.importModule.mockRejectedValueOnce(new Error("blocked by client"));
+
+    await reconcilePluginFrontends(state, deps);
+    await reconcilePluginFrontends(state, deps);
+    await reconcilePluginFrontends(state, deps);
+
+    expect(deps.importModule).toHaveBeenCalledTimes(2);
+    expect(deps.importModule).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/plugins/hello/assets/app.js?h=v1",
+    );
+    expect(deps.importModule).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/plugins/hello/assets/app.js?h=v1&bb_retry=1",
+    );
+    expect(state.records.get("hello")?.status).toBe("loaded");
   });
 
   it("mounts once, skips repeated reconciliation, and disposes exactly once on reload and removal", async () => {

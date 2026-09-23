@@ -35,6 +35,7 @@ import type { NotificationHub } from "../../ws/hub.js";
 import { resolveProviderPlanCommand } from "../providers/provider-plan-command.js";
 import type { ProviderRegistryService } from "../providers/provider-registry.js";
 import { listQueuedThreadMessageCountsByThreadIds } from "@bb/db";
+import { resolveEnvironmentWorkspaceDisplayKind } from "../environments/environment-response.js";
 import { canThreadSpawnChild } from "./thread-parent.js";
 import { toThreadEventWithMeta } from "./timeline.js";
 
@@ -169,6 +170,7 @@ function toPublicThread(thread: Thread): Thread {
     status: thread.status,
     parentThreadId: thread.parentThreadId,
     sourceThreadId: thread.sourceThreadId,
+    lifecycleOwnerThreadId: thread.lifecycleOwnerThreadId,
     originKind: thread.originKind,
     originPluginId: thread.originPluginId,
     visibility: thread.visibility,
@@ -594,8 +596,13 @@ function toThreadListEntryResponseFromLatestSession(
     environmentBranchName: args.thread.environmentBranchName,
     environmentHostId: args.thread.environmentHostId,
     environmentName: args.thread.environmentName,
-    environmentWorkspaceDisplayKind:
-      args.thread.environmentWorkspaceDisplayKind,
+    environmentPath: args.thread.environmentPath,
+    environmentProviderId: args.thread.environmentProviderId,
+    environmentIsWorktree: args.thread.environmentIsWorktree,
+    environmentWorkspaceDisplayKind: resolveEnvironmentWorkspaceDisplayKind({
+      environmentProviderId: args.thread.environmentProviderId,
+      isWorktree: args.thread.environmentIsWorktree,
+    }),
     hasPendingInteraction: args.thread.hasPendingInteraction,
     runtime: resolveThreadRuntimeStateFromLatestSession({
       environmentHostId: args.thread.environmentHostId,

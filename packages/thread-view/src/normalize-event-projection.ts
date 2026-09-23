@@ -1,5 +1,10 @@
+import { getProjectionEntryMessages } from "./event-projection-flatten.js";
 import { isLegacyDelegationToolCall } from "@bb/domain";
-import { getFirstStringField, messageId } from "./format-helpers.js";
+import {
+  getFirstStringField,
+  getMessageStartedAt,
+  messageId,
+} from "./format-helpers.js";
 import type {
   EventProjectionDelegationMessage,
   EventProjectionMessage,
@@ -39,14 +44,6 @@ interface TurnMessageContext {
 }
 
 type SemanticMessageContext = StandaloneMessageContext | TurnMessageContext;
-
-interface NormalizeEventProjectionOptions {
-  contextOnlyToolCallIds?: ReadonlySet<string>;
-}
-
-function getStartedAt(message: MessageTimingSource): number {
-  return message.startedAt ?? message.createdAt;
-}
 
 export function sortEventProjectionMessagesBySource(
   messages: EventProjectionMessage[],
@@ -111,7 +108,7 @@ function maybeStartedAt(
   childBounds: ProjectionMessageBounds | null,
 ): number | undefined {
   if (childBounds) {
-    return Math.min(getStartedAt(message), childBounds.startedAt);
+    return Math.min(getMessageStartedAt(message), childBounds.startedAt);
   }
   return message.startedAt;
 }
@@ -161,11 +158,11 @@ function mergeChildProjections(
 
   const existingMessageIds = new Set(
     existingProjection.entries
-      .flatMap((entry) => getEntryMessages(entry))
+      .flatMap((entry) => getProjectionEntryMessages(entry))
       .map((message) => message.id),
   );
   const discoveredEntries = discoveredProjection.entries.filter((entry) =>
-    getEntryMessages(entry).some(
+    getProjectionEntryMessages(entry).some(
       (message) => !existingMessageIds.has(message.id),
     ),
   );
@@ -180,28 +177,13 @@ function mergeChildProjections(
   };
 }
 
-function getEntryMessages(
-  entry: EventProjectionEntry,
-): readonly EventProjectionMessage[] {
-  if (entry.kind === "projected-message") {
-    return [entry.message];
-  }
-  if (entry.turn.messages) {
-    return entry.turn.messages;
-  }
-  if (entry.turn.terminalMessage) {
-    return [entry.turn.terminalMessage];
-  }
-  return [];
-}
-
 function getProjectionMessageBounds(
   projection: EventProjection,
 ): ProjectionMessageBounds | null {
   let bounds: ProjectionMessageBounds | null = null;
   for (const entry of projection.entries) {
-    for (const message of getEntryMessages(entry)) {
-      const startedAt = getStartedAt(message);
+    for (const message of getProjectionEntryMessages(entry)) {
+      const startedAt = getMessageStartedAt(message);
       bounds = bounds
         ? {
             sourceSeqStart: Math.min(
@@ -258,7 +240,7 @@ function collectProjectionMessageContexts(
       return;
     }
 
-    for (const message of getEntryMessages(entry)) {
+    for (const message of getProjectionEntryMessages(entry)) {
       contexts.push({
         kind: "turn",
         entryIndex,
@@ -290,15 +272,9 @@ class SemanticProjectionBuilder {
     string,
     SemanticMessageContext[]
   >();
-  private readonly contextOnlyToolCallIds: ReadonlySet<string>;
   private readonly rootContexts: SemanticMessageContext[];
 
-  constructor(
-    contexts: SemanticMessageContext[],
-    options: NormalizeEventProjectionOptions = {},
-  ) {
-    this.contextOnlyToolCallIds =
-      options.contextOnlyToolCallIds ?? new Set<string>();
+  constructor(contexts: SemanticMessageContext[]) {
     const referencedParentCallIds = new Set(
       contexts
         .map((context) => context.message.parentToolCallId)
@@ -342,19 +318,8 @@ class SemanticProjectionBuilder {
     );
   }
 
-  private isContextOnlyToolCall(context: SemanticMessageContext): boolean {
-    return (
-      (context.message.kind === "delegation" ||
-        context.message.kind === "tool-call") &&
-      this.contextOnlyToolCallIds.has(context.message.callId)
-    );
-  }
-
   private isRootSuppressedContext(context: SemanticMessageContext): boolean {
-    return (
-      this.isContextOnlyToolCall(context) ||
-      context.message.parentToolCallId !== undefined
-    );
+    return context.message.parentToolCallId !== undefined;
   }
 
   buildRootProjection(): EventProjection {
@@ -444,11 +409,9 @@ class SemanticProjectionBuilder {
 
 export function normalizeEventProjection(
   projection: EventProjection,
-  options: NormalizeEventProjectionOptions = {},
 ): EventProjection {
   const normalizedProjection = new SemanticProjectionBuilder(
     collectProjectionMessageContexts(projection),
-    options,
   ).buildRootProjection();
   return {
     ...normalizedProjection,

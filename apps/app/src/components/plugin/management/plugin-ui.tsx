@@ -1,11 +1,9 @@
+import { PluginBrandIcon } from "@bb/shared-ui/plugin-icon";
 import { useState, type ReactNode } from "react";
-import { Icon, type IconName } from "@bb/shared-ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@bb/shared-ui/lib/utils";
-import {
-  PluginCompactIconMask,
-  PluginIcon,
-  pluginIconName,
-} from "@/components/plugin/PluginIcon";
+import { ResourceIconFrame } from "@bb/shared-ui/resource-list";
+import { PluginIcon } from "@/components/plugin/PluginIcon";
 import { usePreferredTheme } from "@/hooks/useTheme";
 import type { PluginListItem } from "@/hooks/queries/plugin-settings-queries";
 
@@ -24,6 +22,99 @@ export function displayPluginVersion(version: string): string {
 export const SUCCESS_TEXT_STYLE = {
   color: "color-mix(in oklab, var(--success) 80%, var(--ink))",
 } as const;
+
+const PLUGIN_INSTALL_COUNT_FORMATTER = new Intl.NumberFormat(undefined, {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+export function pluginInstallCountPresentation(
+  installs: number | null,
+): { display: string; accessibleLabel: string } | undefined {
+  if (installs === null) return undefined;
+  return {
+    display: PLUGIN_INSTALL_COUNT_FORMATTER.format(installs),
+    accessibleLabel: `${installs.toLocaleString()} ${installs === 1 ? "install" : "installs"}`,
+  };
+}
+
+const PLUGIN_CATEGORY_ACCENT_TOKENS: Record<string, string> = {
+  "themes-and-appearance": "--file-accent",
+  "thread-management": "--file-accent",
+  "thread-content": "--file-accent",
+  "memory-and-context": "--success",
+  security: "--warning",
+  "agents-and-providers": "--success",
+  environments: "--attention",
+  "token-usage-and-limits": "--warning",
+  notifications: "--warning",
+  "code-and-reviews": "--pr-merged",
+  "file-viewers-and-editors": "--pr-merged",
+  "cloud-and-remote": "--attention",
+  "command-line": "--attention",
+  utilities: "--attention",
+  "plugin-development": "--pr-merged",
+  "tasks-and-workflows": "--success",
+};
+
+function neutral(percent: number): string {
+  return `color-mix(in oklch, var(--ink) ${percent}%, var(--canvas))`;
+}
+
+function pluginCatalogCategoryAccentToken(
+  categoryId: string | undefined,
+): string | undefined {
+  return categoryId === undefined
+    ? undefined
+    : PLUGIN_CATEGORY_ACCENT_TOKENS[categoryId];
+}
+
+const PLUGIN_CATEGORY_ICONS: Record<string, string> = {
+  "themes-and-appearance": "Palette",
+  "thread-management": "ListView",
+  "thread-content": "MessageSquare",
+  "memory-and-context": "Brain",
+  security: "Lock",
+  "agents-and-providers": "Bot",
+  environments: "Laptop",
+  "token-usage-and-limits": "ChartColumn",
+  notifications: "BellDot",
+  "code-and-reviews": "GitPullRequest",
+  "file-viewers-and-editors": "FileText",
+  "cloud-and-remote": "Cloud",
+  "command-line": "Terminal",
+  utilities: "Toolbox",
+  "plugin-development": "Puzzle",
+  "tasks-and-workflows": "Workflow",
+};
+
+export function pluginCatalogCategoryIconName(
+  categoryId: string | undefined,
+): string | undefined {
+  return categoryId === undefined ? undefined : PLUGIN_CATEGORY_ICONS[categoryId];
+}
+
+export function PluginCategoryIcon({
+  categoryId,
+  className,
+}: {
+  categoryId: string | undefined;
+  className?: string;
+}) {
+  const iconName = pluginCatalogCategoryIconName(categoryId);
+  const accentToken = pluginCatalogCategoryAccentToken(categoryId);
+  if (iconName === undefined || accentToken === undefined) return null;
+  return (
+    <Icon
+      name={iconName}
+      className={cn("shrink-0", className)}
+      style={{
+        color: `color-mix(in oklab, var(${accentToken}) 75%, var(--ink))`,
+      }}
+      aria-hidden
+    />
+  );
+}
 
 export function PluginLogo({
   plugin,
@@ -80,46 +171,55 @@ export function CatalogEntryIcon({
   };
   className: string;
 }) {
-  const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
-  if (entry.iconUrl !== null && entry.iconTinted) {
-    return <PluginCompactIconMask url={entry.iconUrl} className={className} />;
-  }
-  if (entry.iconUrl === null || entry.iconUrl === failedIconUrl) {
-    return (
-      <PlaceholderBadge
-        className={className}
-        iconName={pluginIconName(entry.icon)}
-      />
-    );
-  }
-  return (
-    <img
-      src={entry.iconUrl}
-      alt=""
-      aria-hidden="true"
-      className={cn("rounded-sm object-contain", className)}
-      onError={() => setFailedIconUrl(entry.iconUrl)}
-    />
-  );
-}
-
-function PlaceholderBadge({
-  className,
-  iconName = "Zap",
-}: {
-  className?: string;
-  iconName?: IconName;
-}) {
   return (
     <span
       aria-hidden="true"
+      data-catalog-entry-icon-glyph=""
+      className={cn("grid shrink-0 place-items-center", className)}
+    >
+      <PluginBrandIcon
+        icon={entry.icon}
+        iconUrl={entry.iconUrl}
+        iconTinted={entry.iconTinted}
+        className="size-full"
+      />
+    </span>
+  );
+}
+
+export function CatalogEntryIconChip({
+  entry,
+  className,
+  compact = false,
+}: {
+  entry: {
+    displayName: string;
+    icon: string | null;
+    iconUrl: string | null;
+    iconTinted: boolean;
+  };
+  className?: string;
+  compact?: boolean;
+}) {
+  return (
+    <ResourceIconFrame
       className={cn(
-        "grid shrink-0 place-items-center text-muted-foreground",
+        compact ? "size-6 rounded border" : "size-10 rounded-md border",
         className,
       )}
+      style={{
+        background: neutral(5),
+        borderColor: neutral(14),
+        color: neutral(55),
+      }}
     >
-      <Icon name={iconName} className="size-5" />
-    </span>
+      {() => (
+        <CatalogEntryIcon
+          entry={entry}
+          className={compact ? "size-4" : "size-6"}
+        />
+      )}
+    </ResourceIconFrame>
   );
 }
 
@@ -129,6 +229,10 @@ export function formatAbsoluteDate(epochMs: number): string {
     day: "numeric",
     year: "numeric",
   });
+}
+
+export function formatUrlLabel(url: string): string {
+  return url.replace(/^https?:\/\//u, "").replace(/\/+$/u, "");
 }
 
 interface DetailsDisclosureProps {

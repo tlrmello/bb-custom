@@ -81,6 +81,16 @@ export const APP_COMMAND_GROUPS: readonly AppCommandGroup[] = [
         "Search and run bb commands from the keyboard.",
       ),
       command("window.new", "New window", "Open another bb desktop window."),
+      command(
+        "window.find",
+        "Find in window",
+        "Search the text shown in the current bb desktop window.",
+      ),
+      command(
+        "app.back",
+        "Back to app",
+        "Return from Settings, Plugins, or Skills to the app.",
+      ),
       command("settings.open", "Open settings", "Open bb settings."),
       command(
         "settings.openServers",
@@ -91,6 +101,26 @@ export const APP_COMMAND_GROUPS: readonly AppCommandGroup[] = [
         "sidebar.toggle",
         "Toggle sidebar",
         "Show or hide the app sidebar.",
+      ),
+      command(
+        "panel.previousTab",
+        "Previous panel tab",
+        "Select the previous visible right-panel tab, wrapping across panel splits.",
+      ),
+      command(
+        "panel.nextTab",
+        "Next panel tab",
+        "Select the next visible right-panel tab, wrapping across panel splits.",
+      ),
+      command(
+        "panel.previousNewTabItem",
+        "Previous New tab item",
+        "Focus the previous search, action, or recent item on the selected New tab page.",
+      ),
+      command(
+        "panel.nextNewTabItem",
+        "Next New tab item",
+        "Focus the next search, action, or recent item on the selected New tab page.",
       ),
       command(
         "panel.newTab",
@@ -111,6 +141,26 @@ export const APP_COMMAND_GROUPS: readonly AppCommandGroup[] = [
         "panel.toggle",
         "Toggle panel",
         "Show or hide the secondary panel.",
+      ),
+      command(
+        "pane.focus.left",
+        "Focus chat pane left",
+        "Focus the chat pane to the left of the current pane.",
+      ),
+      command(
+        "pane.focus.right",
+        "Focus chat pane right",
+        "Focus the chat pane to the right of the current pane.",
+      ),
+      command(
+        "pane.focus.up",
+        "Focus chat pane up",
+        "Focus the chat pane above the current pane.",
+      ),
+      command(
+        "pane.focus.down",
+        "Focus chat pane down",
+        "Focus the chat pane below the current pane.",
       ),
       command(
         "pane.focus.previous",
@@ -143,6 +193,11 @@ export const APP_COMMAND_GROUPS: readonly AppCommandGroup[] = [
         "logs.openServerDaemon",
         "Open server and daemon logs",
         "Open the desktop log viewer for the bb server and host daemon.",
+      ),
+      command(
+        "notifications.open",
+        "Show all notifications",
+        "Open the notification center to read and clear past notifications.",
       ),
     ],
   },

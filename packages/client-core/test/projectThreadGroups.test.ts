@@ -1,8 +1,8 @@
 import type { ThreadListEntry } from "@bb/domain";
+import { makeThreadListEntry } from "@bb/test-helpers/domain-fixtures";
 import { describe, expect, it } from "vitest";
 import {
   buildChronologicalThreadList,
-  buildSectionThreadList,
   buildProjectThreadGroups,
   compareByCreatedAtDescending,
   compareStandardThreads,
@@ -10,82 +10,28 @@ import {
   resolveSidebarProjectId,
   type ProjectThreadItem,
   type ProjectThreadNode,
-  type ThreadComparator,
 } from "../src/sidebar/projectThreadGroups.js";
 
 type ThreadListEntryOverrides = Partial<ThreadListEntry>;
 type TreeSummary =
   | string
   | { id: string; children: TreeSummary[] }
-  | { env: string; threads: TreeSummary[] }
-  | { section: string; name: string; items: TreeSummary[] };
-
-function getItemAlphaLabel(item: ProjectThreadItem): string {
-  switch (item.kind) {
-    case "section":
-      return item.group.name;
-    case "thread":
-      return item.node.thread.title ?? item.node.thread.titleFallback ?? "";
-    case "environment":
-      return (
-        item.group.nodes[0]?.thread.title ??
-        item.group.nodes[0]?.thread.titleFallback ??
-        ""
-      );
-  }
-}
-
-const compareAlphaDescending = ((left, right) =>
-  (right.title ?? right.titleFallback ?? "").localeCompare(
-    left.title ?? left.titleFallback ?? "",
-  )) as ThreadComparator;
-compareAlphaDescending.compareItems = (left, right) =>
-  getItemAlphaLabel(right).localeCompare(getItemAlphaLabel(left));
+  | { env: string; threads: TreeSummary[] };
 
 function createThread(
   overrides: ThreadListEntryOverrides = {},
 ): ThreadListEntry {
-  return {
+  return makeThreadListEntry({
     id: "thr_1",
     projectId: "proj_1",
-    environmentId: null,
-    providerId: "codex",
     title: "Thread",
     titleFallback: "Thread",
-    sectionId: null,
-    status: "idle",
-    parentThreadId: null,
-    sourceThreadId: null,
-    originKind: null,
-    originPluginId: null,
-    visibility: "visible",
-    archivedAt: null,
-    pinnedAt: null,
-    pinSortKey: null,
-    deletedAt: null,
     lastReadAt: 0,
     latestAttentionAt: 2,
     createdAt: 1,
     updatedAt: 2,
-    activity: {
-      activeWorkflowCount: 0,
-      activeBackgroundAgentCount: 0,
-      activeBackgroundCommandCount: 0,
-      activePlanModeCount: 0,
-      activeGoalCount: 0,
-    },
-    hasPendingInteraction: false,
-    environmentHostId: null,
-    environmentName: null,
-    environmentBranchName: null,
-    queuedWork: "none",
-    environmentWorkspaceDisplayKind: "other",
-    runtime: {
-      displayStatus: "idle",
-      hostReconnectGraceExpiresAt: null,
-    },
     ...overrides,
-  };
+  });
 }
 
 function summarizeNode(node: ProjectThreadNode): TreeSummary {
@@ -109,12 +55,6 @@ function summarizeItems(items: readonly ProjectThreadItem[]): TreeSummary[] {
           env: item.group.environmentId,
           threads: item.group.nodes.map(summarizeNode),
         };
-      case "section":
-        return {
-          section: item.group.key,
-          name: item.group.name,
-          items: summarizeItems(item.group.items),
-        };
     }
   });
 }
@@ -124,13 +64,6 @@ function findNode(
   threadId: string,
 ): ProjectThreadNode | null {
   for (const item of items) {
-    if (item.kind === "section") {
-      const sectionNode = findNode(item.group.items, threadId);
-      if (sectionNode) {
-        return sectionNode;
-      }
-      continue;
-    }
     const nodes = item.kind === "thread" ? [item.node] : item.group.nodes;
     for (const node of nodes) {
       if (node.thread.id === threadId) {
@@ -258,7 +191,124 @@ describe("buildProjectThreadGroups", () => {
     ]);
   });
 
-  it("groups shared worktree environments at nested sibling levels", () => {
+  it("leaves a shared environment from a provider that made no worktree loose", () => {
+    const rootItems = buildProjectThreadGroups([
+      createThread({
+        id: "sandbox-a",
+        environmentId: "env_sandbox",
+        environmentProviderId: "modal-sandbox",
+        environmentIsWorktree: false,
+        createdAt: 10,
+      }),
+      createThread({
+        id: "sandbox-b",
+        environmentId: "env_sandbox",
+        environmentProviderId: "modal-sandbox",
+        environmentIsWorktree: false,
+        createdAt: 20,
+      }),
+    ]);
+
+    expect(summarizeItems(rootItems)).toEqual(["sandbox-b", "sandbox-a"]);
+  });
+
+  it("groups a checkout provider's threads when its directory is a linked worktree", () => {
+    const rootItems = buildProjectThreadGroups([
+      createThread({
+        id: "checkout-a",
+        environmentId: "env_checkout",
+        environmentProviderId: "project-checkout",
+        environmentIsWorktree: true,
+        createdAt: 10,
+      }),
+      createThread({
+        id: "checkout-b",
+        environmentId: "env_checkout",
+        environmentProviderId: "project-checkout",
+        environmentIsWorktree: true,
+        createdAt: 20,
+      }),
+    ]);
+
+    expect(summarizeItems(rootItems)).toEqual([
+      { env: "env_checkout", threads: ["checkout-b", "checkout-a"] },
+    ]);
+    const [group] = rootItems;
+    expect(
+      group.kind === "environment" && group.group.environmentProviderId,
+    ).toBe("project-checkout");
+  });
+
+  it("leaves threads sharing the project's own checkout loose", () => {
+    const rootItems = buildProjectThreadGroups([
+      createThread({
+        id: "checkout-a",
+        environmentId: "env_checkout",
+        environmentProviderId: "project-checkout",
+        environmentIsWorktree: false,
+        createdAt: 10,
+      }),
+      createThread({
+        id: "checkout-b",
+        environmentId: "env_checkout",
+        environmentProviderId: "project-checkout",
+        environmentIsWorktree: false,
+        createdAt: 20,
+      }),
+    ]);
+
+    expect(summarizeItems(rootItems)).toEqual(["checkout-b", "checkout-a"]);
+  });
+
+  it("leaves a single thread on an environment ungrouped", () => {
+    const rootItems = buildProjectThreadGroups([
+      createThread({
+        id: "only-a",
+        environmentId: "env_only",
+        environmentProviderId: null,
+        createdAt: 10,
+      }),
+      createThread({
+        id: "only-b",
+        environmentId: "env_other",
+        environmentProviderId: "git-worktree",
+        environmentIsWorktree: true,
+        createdAt: 20,
+      }),
+    ]);
+
+    expect(summarizeItems(rootItems)).toEqual(["only-b", "only-a"]);
+  });
+
+  it("leaves personal threads ungrouped, one environment each", () => {
+    const rootItems = buildProjectThreadGroups([
+      createThread({
+        id: "notes",
+        environmentId: "env_notes",
+        environmentProviderId: "personal-workspace",
+        environmentIsWorktree: false,
+        createdAt: 10,
+      }),
+      createThread({
+        id: "errands",
+        environmentId: "env_errands",
+        environmentProviderId: "personal-workspace",
+        environmentIsWorktree: false,
+        createdAt: 20,
+      }),
+      createThread({
+        id: "reading",
+        environmentId: "env_reading",
+        environmentProviderId: "personal-workspace",
+        environmentIsWorktree: false,
+        createdAt: 30,
+      }),
+    ]);
+
+    expect(summarizeItems(rootItems)).toEqual(["reading", "errands", "notes"]);
+  });
+
+  it("groups shared environments at nested sibling levels", () => {
     const rootItems = buildProjectThreadGroups([
       createThread({
         id: "parent",
@@ -269,7 +319,8 @@ describe("buildProjectThreadGroups", () => {
         parentThreadId: "parent",
         environmentId: "env_shared",
         queuedWork: "none",
-        environmentWorkspaceDisplayKind: "managed-worktree",
+        environmentProviderId: "git-worktree",
+        environmentIsWorktree: true,
         createdAt: 10,
         latestAttentionAt: 100,
       }),
@@ -278,7 +329,8 @@ describe("buildProjectThreadGroups", () => {
         parentThreadId: "parent",
         environmentId: "env_shared",
         queuedWork: "none",
-        environmentWorkspaceDisplayKind: "managed-worktree",
+        environmentProviderId: "git-worktree",
+        environmentIsWorktree: true,
         createdAt: 20,
         latestAttentionAt: 200,
       }),
@@ -477,7 +529,6 @@ describe("buildProjectThreadGroups", () => {
             parentThreadId: "parent",
             environmentId: "env_shared",
             queuedWork: "none",
-            environmentWorkspaceDisplayKind: "managed-worktree",
             createdAt: 10,
             latestAttentionAt: 100,
           }),
@@ -486,7 +537,6 @@ describe("buildProjectThreadGroups", () => {
             parentThreadId: "parent",
             environmentId: "env_shared",
             queuedWork: "none",
-            environmentWorkspaceDisplayKind: "managed-worktree",
             createdAt: 20,
             latestAttentionAt: 200,
           }),
@@ -544,284 +594,33 @@ describe("buildProjectThreadGroups", () => {
   });
 });
 
-describe("section bucketing", () => {
-  it("buckets threads into flat sections by section id, sections above loose threads", () => {
-    const items = buildSectionThreadList(
-      [
-        createThread({ id: "a", title: "Plan", sectionId: "sec_work_q3" }),
-        createThread({ id: "b", title: "Notes", sectionId: "sec_work_q3" }),
-        createThread({ id: "c", title: "Q4", sectionId: "sec_work" }),
-        createThread({ id: "d", title: "Standalone" }),
-      ],
+describe("worktree grouping preference", () => {
+  const worktreeSiblings = [
+    createThread({
+      id: "wt-a",
+      environmentId: "env_wt",
+      environmentIsWorktree: true,
+      sectionId: "sec_work",
+      createdAt: 10,
+    }),
+    createThread({
+      id: "wt-b",
+      environmentId: "env_wt",
+      environmentIsWorktree: true,
+      sectionId: "sec_work",
+      createdAt: 20,
+    }),
+  ];
+
+  it("keeps worktree siblings flat under a project when disabled", () => {
+    const items = buildProjectThreadGroups(
+      worktreeSiblings,
       compareStandardThreads,
-      [
-        { id: "sec_work", name: "Work" },
-        { id: "sec_work_q3", name: "Work/Q3" },
-      ],
+      new Set(),
+      false,
     );
 
-    expect(summarizeItems(items)).toEqual([
-      { section: "chronological::sec_work", name: "Work", items: ["c"] },
-      {
-        section: "chronological::sec_work_q3",
-        name: "Work/Q3",
-        items: ["a", "b"],
-      },
-      "d",
-    ]);
-  });
-
-  it("does not derive sections from slashes in titles", () => {
-    const items = buildSectionThreadList([
-      createThread({ id: "a", title: "Work/Q3/Plan" }),
-      createThread({ id: "b", title: "Work/Notes" }),
-    ]);
-
-    expect(summarizeItems(items)).toEqual(["a", "b"]);
-  });
-
-  it("renders explicit empty sections without a thread using that id", () => {
-    const items = buildSectionThreadList(
-      [createThread({ id: "a", title: "Standalone" })],
-      compareStandardThreads,
-      [{ id: "sec_work_q3", name: "Work/Q3" }],
-    );
-
-    expect(summarizeItems(items)).toEqual([
-      {
-        section: "chronological::sec_work_q3",
-        name: "Work/Q3",
-        items: [],
-      },
-      "a",
-    ]);
-  });
-
-  it("keeps a section thread's own children nested under it and ignores child sections", () => {
-    const items = buildSectionThreadList(
-      [
-        createThread({
-          id: "parent",
-          title: "Project",
-          sectionId: "sec_work",
-        }),
-        createThread({
-          id: "child",
-          parentThreadId: "parent",
-          title: "Path",
-          sectionId: "sec_ignored",
-        }),
-      ],
-      compareStandardThreads,
-      [
-        { id: "sec_work", name: "Work" },
-        { id: "sec_ignored", name: "Ignored/Child" },
-      ],
-    );
-
-    expect(summarizeItems(items)).toEqual([
-      {
-        section: "chronological::sec_work",
-        name: "Work",
-        items: [{ id: "parent", children: ["child"] }],
-      },
-      {
-        section: "chronological::sec_ignored",
-        name: "Ignored/Child",
-        items: [],
-      },
-    ]);
-  });
-
-  it("orders explicit sections by name rather than descendant recency", () => {
-    const threads = [
-      createThread({
-        id: "old-active",
-        title: "x",
-        sectionId: "sec_archive",
-        status: "active",
-        createdAt: 10,
-        latestAttentionAt: 5,
-        runtime: { displayStatus: "active", hostReconnectGraceExpiresAt: null },
-      }),
-      createThread({
-        id: "new-idle",
-        title: "y",
-        sectionId: "sec_work",
-        status: "idle",
-        createdAt: 50,
-        latestAttentionAt: 5,
-      }),
-    ];
-
-    const sections = [
-      { id: "sec_archive", name: "Archive" },
-      { id: "sec_empty", name: "Empty" },
-      { id: "sec_work", name: "Work" },
-    ];
-
-    expect(
-      summarizeItems(
-        buildSectionThreadList(threads, compareStandardThreads, sections),
-      ),
-    ).toEqual([
-      {
-        section: "chronological::sec_archive",
-        name: "Archive",
-        items: ["old-active"],
-      },
-      { section: "chronological::sec_empty", name: "Empty", items: [] },
-      {
-        section: "chronological::sec_work",
-        name: "Work",
-        items: ["new-idle"],
-      },
-    ]);
-
-    expect(
-      summarizeItems(
-        buildSectionThreadList(threads, compareByCreatedAtDescending, sections),
-      ),
-    ).toEqual([
-      {
-        section: "chronological::sec_archive",
-        name: "Archive",
-        items: ["old-active"],
-      },
-      { section: "chronological::sec_empty", name: "Empty", items: [] },
-      {
-        section: "chronological::sec_work",
-        name: "Work",
-        items: ["new-idle"],
-      },
-    ]);
-  });
-
-  it("applies alpha descending order to section rows", () => {
-    const items = buildSectionThreadList([], compareAlphaDescending, [
-      { id: "sec_archive", name: "Archive" },
-      { id: "sec_empty", name: "Empty" },
-      { id: "sec_work", name: "Work" },
-    ]);
-
-    expect(summarizeItems(items)).toEqual([
-      { section: "chronological::sec_work", name: "Work", items: [] },
-      { section: "chronological::sec_empty", name: "Empty", items: [] },
-      { section: "chronological::sec_archive", name: "Archive", items: [] },
-    ]);
-  });
-
-  it("rolls descendant count + activity up onto the section group", () => {
-    const items = buildSectionThreadList(
-      [
-        createThread({
-          id: "busy",
-          title: "Busy",
-          sectionId: "sec_work",
-          hasPendingInteraction: true,
-        }),
-        createThread({ id: "quiet", title: "Quiet", sectionId: "sec_work" }),
-      ],
-      compareStandardThreads,
-      [{ id: "sec_work", name: "Work" }],
-    );
-
-    expect(items).toHaveLength(1);
-    const section = items[0];
-    if (section.kind !== "section") {
-      throw new Error("expected a section item");
-    }
-    expect(section.group.threadCount).toBe(2);
-    expect(section.group.activity.pending).toBe(true);
-  });
-
-  it("folds the chronological list into sections", () => {
-    const items = buildSectionThreadList(
-      [
-        createThread({
-          id: "a",
-          title: "One",
-          sectionId: "sec_work",
-          createdAt: 20,
-        }),
-        createThread({
-          id: "b",
-          title: "Two",
-          sectionId: "sec_personal",
-          createdAt: 10,
-        }),
-      ],
-      compareByCreatedAtDescending,
-      [
-        { id: "sec_personal", name: "Personal" },
-        { id: "sec_work", name: "Work" },
-      ],
-    );
-
-    expect(summarizeItems(items)).toEqual([
-      {
-        section: "chronological::sec_personal",
-        name: "Personal",
-        items: ["b"],
-      },
-      { section: "chronological::sec_work", name: "Work", items: ["a"] },
-    ]);
-  });
-
-  it("nests a child thread under its parent root inside a section", () => {
-    const items = buildSectionThreadList(
-      [
-        createThread({
-          id: "parent",
-          title: "Parent",
-          sectionId: "sec_work",
-          createdAt: 20,
-        }),
-        createThread({
-          id: "child",
-          parentThreadId: "parent",
-          title: "Child",
-          createdAt: 10,
-        }),
-      ],
-      compareByCreatedAtDescending,
-      [{ id: "sec_work", name: "Work" }],
-    );
-
-    expect(summarizeItems(items)).toEqual([
-      {
-        section: "chronological::sec_work",
-        name: "Work",
-        items: [{ id: "parent", children: ["child"] }],
-      },
-    ]);
-  });
-
-  it("combines threads from different projects that share the same section id", () => {
-    const items = buildSectionThreadList(
-      [
-        createThread({
-          id: "a",
-          projectId: "proj_1",
-          title: "One",
-          sectionId: "sec_work",
-          createdAt: 20,
-        }),
-        createThread({
-          id: "b",
-          projectId: "proj_2",
-          title: "Two",
-          sectionId: "sec_work",
-          createdAt: 10,
-        }),
-      ],
-      compareByCreatedAtDescending,
-      [{ id: "sec_work", name: "Work" }],
-    );
-
-    expect(summarizeItems(items)).toEqual([
-      { section: "chronological::sec_work", name: "Work", items: ["a", "b"] },
-    ]);
+    expect(summarizeItems(items)).toEqual(["wt-b", "wt-a"]);
   });
 });
 

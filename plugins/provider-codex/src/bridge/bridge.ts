@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import {
   isStandaloneBuiltinCompactCommand,
   approvalInteractionOutcomeSchema,
@@ -59,6 +60,7 @@ import {
 } from "../interactive-requests.js";
 import { parseModelsResponse } from "../models.js";
 import { macOsPermissionPresentation } from "../presentation.js";
+import { codexTurnSchema } from "../schemas.js";
 import {
   resolveCodexInstructionOverrides,
   toCodexDynamicTools,
@@ -78,6 +80,7 @@ import {
 import {
   createCodexAppServerConnection,
   CodexAppServerExitedError,
+  CodexAppServerRpcError,
   type CodexAppServerConnection,
   type CodexAppServerExitInfo,
   type CodexAppServerRequestResponder,
@@ -88,6 +91,8 @@ import {
   getCodexProviderInstallationStatus,
   getCodexProviderUsage,
 } from "./provider-maintenance.js";
+
+type BbThreadResumeParams = ThreadResumeParams & { excludeTurns: boolean };
 
 const codexBridgeCommandSchema = z.discriminatedUnion("method", [
   z.object({
@@ -266,6 +271,8 @@ function sendRuntimeRequest(
 
 const CODEX_APP_SERVER_COMMAND_ENV = "BB_CODEX_BRIDGE_APP_SERVER_COMMAND";
 const CODEX_APP_SERVER_ARGS_ENV = "BB_CODEX_BRIDGE_APP_SERVER_ARGS";
+const CODEX_POOL_BASE_URL_ENV = "CODEX_OPENAI_BASE_URL";
+const CODEX_POOL_AUTH_TOKEN_ENV = "CODEX_POOL_AUTH_TOKEN";
 
 const CODEX_INITIALIZE_PARAMS = {
   clientInfo: { name: "bb", version: "1.0.0", title: null },
@@ -276,6 +283,9 @@ const CHILD_REQUEST_TIMEOUT_MS = 60_000;
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const CODEX_ARCHIVED_SESSION_ERROR_PATTERN =
   /\b(?:session|thread)\s+\S+\s+is archived\b/i;
+const CODEX_ACTIVE_WRITER_ERROR_PATTERN =
+  /\bthread\s+\S+\s+already has an active writer\b/i;
+const CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS = [100, 400, 1_000] as const;
 const CODEX_ALREADY_ARCHIVED_ERROR_PATTERN =
   /\bno rollout found for thread id\b/i;
 const CODEX_NOT_ARCHIVED_ERROR_PATTERN =
@@ -326,21 +336,67 @@ async function delay(ms: number): Promise<void> {
 const MISSING_CODEX_CLI_GUIDANCE =
   "bb could not find the Codex CLI on this machine. Install Codex (https://developers.openai.com/codex/cli) or put `codex` on PATH, then retry.";
 
-function resolveAppServerLaunch(): { command: string; args: string[] } {
-  const command = process.env[CODEX_APP_SERVER_COMMAND_ENV];
-  if (!command) {
-    return { command: "codex", args: ["app-server"] };
-  }
-  const rawArgs = process.env[CODEX_APP_SERVER_ARGS_ENV];
-  if (!rawArgs) {
-    return { command, args: [] };
-  }
-  return { command, args: z.array(z.string()).parse(JSON.parse(rawArgs)) };
+export function resolveAppServerLaunch(env: NodeJS.ProcessEnv = process.env): {
+  command: string;
+  args: string[];
+} {
+  const command = env[CODEX_APP_SERVER_COMMAND_ENV];
+  const rawArgs = env[CODEX_APP_SERVER_ARGS_ENV];
+  const args = command
+    ? rawArgs
+      ? z.array(z.string()).parse(JSON.parse(rawArgs))
+      : []
+    : ["app-server"];
+  const poolBaseUrl = env[CODEX_POOL_BASE_URL_ENV];
+  const poolToken = env[CODEX_POOL_AUTH_TOKEN_ENV];
+  if (!poolBaseUrl || !poolToken) return { command: command ?? "codex", args };
+  return {
+    command: command ?? "codex",
+    args: [
+      ...args,
+      "-c",
+      `openai_base_url=${JSON.stringify(poolBaseUrl)}`,
+      "-c",
+      'model_provider="bb-account-pool"',
+      "-c",
+      'model_providers.bb-account-pool.name="OpenAI"',
+      "-c",
+      `model_providers.bb-account-pool.base_url=${JSON.stringify(poolBaseUrl)}`,
+      "-c",
+      'model_providers.bb-account-pool.wire_api="responses"',
+      "-c",
+      "model_providers.bb-account-pool.requires_openai_auth=true",
+      "-c",
+      "model_providers.bb-account-pool.supports_websockets=false",
+      "-c",
+      'model_providers.bb-account-pool.env_http_headers.x-bb-account-pool-token="CODEX_POOL_AUTH_TOKEN"',
+    ],
+  };
 }
 
-function buildAppServerEnv(): NodeJS.ProcessEnv {
+function appServerLaunchEnv(
+  envVars: Readonly<Record<string, string>> | undefined,
+): NodeJS.ProcessEnv {
+  const poolBaseUrl = envVars?.[CODEX_POOL_BASE_URL_ENV];
+  const poolAuthToken = envVars?.[CODEX_POOL_AUTH_TOKEN_ENV];
+  return {
+    ...process.env,
+    ...(poolBaseUrl === undefined
+      ? {}
+      : { [CODEX_POOL_BASE_URL_ENV]: poolBaseUrl }),
+    ...(poolAuthToken === undefined
+      ? {}
+      : { [CODEX_POOL_AUTH_TOKEN_ENV]: poolAuthToken }),
+  };
+}
+
+function buildAppServerEnv(
+  envVars: Readonly<Record<string, string>> | undefined,
+): NodeJS.ProcessEnv {
   return withoutBridgeRuntimeEnv(
-    sanitizeInheritedChildProcessEnv({ env: process.env }),
+    sanitizeInheritedChildProcessEnv({
+      env: appServerLaunchEnv(envVars),
+    }),
   );
 }
 
@@ -357,6 +413,39 @@ interface CodexSessionConstruction {
   dynamicTools: DynamicTool[] | undefined;
 }
 
+interface ResponseOpenedTurn {
+  nativeStarted: boolean;
+  waiters: Array<(started: boolean) => void>;
+}
+
+const codexTurnNotificationPeekSchema = z
+  .object({
+    threadId: z.string(),
+    turn: z.object({ id: z.string() }).passthrough(),
+  })
+  .passthrough();
+
+interface UnopenedDispatch {
+  clientRequestId: TurnStartParamsShape["clientRequestId"];
+  prepared: PreparedProviderCommandDispatch;
+}
+
+interface PendingCompactionDispatch extends UnopenedDispatch {
+  accepted: boolean;
+  outcome: UnopenedDispatchOutcome | null;
+}
+
+type UnopenedDispatchOutcome =
+  | { status: "completed" }
+  | { status: "failed"; error: { message: string } };
+
+const codexThreadStatusChangedParamsSchema = z
+  .object({
+    threadId: z.string(),
+    status: z.object({ type: z.string() }).passthrough(),
+  })
+  .passthrough();
+
 interface CodexBridgeSession {
   bbThreadId: string;
   codexThreadId: string | null;
@@ -366,12 +455,16 @@ interface CodexBridgeSession {
   construction: CodexSessionConstruction;
   constructionSignature: string;
   openCodexTurnIds: Set<string>;
+  responseOpenedTurns: Map<string, ResponseOpenedTurn>;
+  unopenedCompactionDispatches: PendingCompactionDispatch[];
   turnSettledWaiters: Map<string, Array<() => void>>;
   awaitingReplayedUsage: boolean;
   identityAnnounced: boolean;
   pendingPreIdentityDeltas: ThreadDelta[];
   rebuildBeforeNextTurnReason: string | null;
   closing: boolean;
+  previousChildExit: Promise<void> | null;
+  releasePromise: Promise<void> | null;
 }
 
 const sessionsByBbThreadId = new Map<string, CodexBridgeSession>();
@@ -399,13 +492,26 @@ function currentSession(
   return session;
 }
 
-function releaseSession(session: CodexBridgeSession): void {
+function releaseSession(session: CodexBridgeSession): Promise<void> {
+  if (session.releasePromise !== null) {
+    return session.releasePromise;
+  }
   session.closing = true;
   if (sessionsByBbThreadId.get(session.bbThreadId) === session) {
     sessionsByBbThreadId.delete(session.bbThreadId);
   }
-  session.connection?.kill();
+  const previousChildExit = session.previousChildExit;
+  session.previousChildExit = null;
+  const currentChildExit = session.connection?.kill() ?? Promise.resolve();
   session.connection = null;
+  const releasePromise =
+    previousChildExit === null
+      ? currentChildExit
+      : Promise.all([previousChildExit, currentChildExit]).then(
+          () => undefined,
+        );
+  session.releasePromise = releasePromise;
+  return releasePromise;
 }
 
 const codexProviderOptionsSchema = z
@@ -446,6 +552,8 @@ function constructionSignature(
   sessionOptions: CodexSessionOptions,
 ): string {
   const permissionSettings = toCodexThreadPermissionSettings(sessionOptions);
+  const poolBaseUrl = sessionOptions.envVars?.[CODEX_POOL_BASE_URL_ENV];
+  const poolToken = sessionOptions.envVars?.[CODEX_POOL_AUTH_TOKEN_ENV];
   return JSON.stringify({
     cwd,
     reasoningLevel: sessionOptions.reasoningLevel ?? null,
@@ -454,6 +562,13 @@ function constructionSignature(
     approvalPolicy: permissionSettings.approvalPolicy,
     approvalsReviewer: permissionSettings.approvalsReviewer,
     sandbox: permissionSettings.sandbox,
+    poolRoute:
+      poolBaseUrl === undefined || poolToken === undefined
+        ? null
+        : {
+            baseUrl: poolBaseUrl,
+            tokenHash: createHash("sha256").update(poolToken).digest("hex"),
+          },
   });
 }
 
@@ -466,6 +581,12 @@ function sendThreadDeltas(
   }
   const outDeltas: ThreadDelta[] = [];
   for (const delta of deltas) {
+    if (delta.kind === "input.accepted") {
+      session.unopenedCompactionDispatches =
+        session.unopenedCompactionDispatches.filter(
+          (dispatch) => dispatch.clientRequestId !== delta.clientRequestId,
+        );
+    }
     if (delta.kind === "turn.open") {
       session.awaitingReplayedUsage = false;
       if (delta.providerTurnId !== undefined) {
@@ -474,6 +595,7 @@ function sendThreadDeltas(
     }
     if (delta.kind === "turn.boundary" && delta.providerTurnId !== undefined) {
       session.openCodexTurnIds.delete(delta.providerTurnId);
+      settleResponseOpenedTurn(session, delta.providerTurnId);
       const waiters = session.turnSettledWaiters.get(delta.providerTurnId);
       if (waiters !== undefined) {
         session.turnSettledWaiters.delete(delta.providerTurnId);
@@ -554,6 +676,15 @@ function handleChildNotification(
     const parsed = codexThreadStartedNotificationSchema.safeParse(params);
     if (parsed.success) {
       announceSessionIdentity(session, parsed.data.thread.id);
+    }
+  }
+  if (method === "thread/status/changed") {
+    settleCompactionDispatchesWhenCodexIsNotRunning(session, params);
+  }
+  if (method === "turn/started") {
+    const parsed = codexTurnNotificationPeekSchema.safeParse(params);
+    if (parsed.success && parsed.data.threadId === session.codexThreadId) {
+      markResponseOpenedTurnNativelyStarted(session, parsed.data.turn.id);
     }
   }
   const deltas = session.translator.translateEvent(
@@ -736,6 +867,18 @@ function handleChildExit(
     })),
   );
   session.openCodexTurnIds.clear();
+  for (const codexTurnId of [...session.responseOpenedTurns.keys()]) {
+    settleResponseOpenedTurn(session, codexTurnId);
+  }
+  const unopenedCompactions = session.unopenedCompactionDispatches;
+  session.unopenedCompactionDispatches = [];
+  for (const dispatch of unopenedCompactions) {
+    if (!dispatch.accepted) continue;
+    settleUnopenedDispatch(session, dispatch, {
+      status: "failed",
+      error: { message },
+    });
+  }
   sendNotification(BRIDGE_NOTIFICATION_METHODS.error, {
     threadId: session.bbThreadId,
     ...(session.codexThreadId !== null
@@ -754,6 +897,7 @@ function handleChildExit(
 }
 
 function spawnChildConnection(callbacks: {
+  envVars?: Readonly<Record<string, string>>;
   recordThreadId: string | null;
   onNotification: (method: string, params: unknown) => void;
   onRequest: (
@@ -763,13 +907,15 @@ function spawnChildConnection(callbacks: {
   ) => void;
   onExit: (info: CodexAppServerExitInfo) => void;
 }): CodexAppServerConnection {
-  const launch = resolveAppServerLaunch();
+  const env = buildAppServerEnv(callbacks.envVars);
+  const launch = resolveAppServerLaunch(appServerLaunchEnv(callbacks.envVars));
+  const { envVars: _envVars, ...connectionCallbacks } = callbacks;
   return createCodexAppServerConnection({
     command: launch.command,
     args: launch.args,
     cwd: process.cwd(),
-    env: buildAppServerEnv(),
-    ...callbacks,
+    env,
+    ...connectionCallbacks,
   });
 }
 
@@ -816,6 +962,40 @@ const codexThreadIdentityResultSchema = z
   .object({ thread: z.object({ id: z.string().min(1) }).passthrough() })
   .passthrough();
 
+async function requestThreadConstructionWithWriterRetry(
+  connection: CodexAppServerConnection,
+  method: string,
+  params: BbThreadStartParams | BbThreadResumeParams | BbThreadForkParams,
+): Promise<z.infer<typeof codexThreadIdentityResultSchema>> {
+  const sendOnce = (): Promise<
+    z.infer<typeof codexThreadIdentityResultSchema>
+  > =>
+    connection.request({
+      method,
+      params,
+      resultSchema: codexThreadIdentityResultSchema,
+      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+    });
+  for (const [
+    retryIndex,
+    retryDelayMs,
+  ] of CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS.entries()) {
+    try {
+      return await sendOnce();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!CODEX_ACTIVE_WRITER_ERROR_PATTERN.test(message)) {
+        throw error;
+      }
+      process.stderr.write(
+        `codex ${method} found an active rollout writer; retrying in ${retryDelayMs}ms (${retryIndex + 1}/${CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS.length}).\n`,
+      );
+      await delay(retryDelayMs);
+    }
+  }
+  return await sendOnce();
+}
+
 type CodexSessionConstructionRequest =
   | { kind: "start" }
   | { kind: "resume"; providerThreadId: string }
@@ -843,10 +1023,6 @@ async function constructThreadSession(
   args: ConstructThreadSessionArgs,
 ): Promise<ConstructedCodexSession> {
   const existing = sessionsByBbThreadId.get(args.threadId);
-  if (existing) {
-    releaseSession(existing);
-  }
-
   const decoded = decodeCodexOptions(args.options);
   sessionSerialCounter += 1;
   const serial = sessionSerialCounter;
@@ -878,20 +1054,40 @@ async function constructThreadSession(
       decoded.sessionOptions,
     ),
     openCodexTurnIds: new Set(),
+    responseOpenedTurns: new Map(),
+    unopenedCompactionDispatches: [],
     turnSettledWaiters: new Map(),
     awaitingReplayedUsage: args.request.kind !== "start",
     identityAnnounced: false,
     pendingPreIdentityDeltas: [],
     rebuildBeforeNextTurnReason: null,
     closing: false,
+    previousChildExit: null,
+    releasePromise: null,
   };
   sessionsByBbThreadId.set(args.threadId, session);
+  if (existing) {
+    const previousChildExit = releaseSession(existing);
+    session.previousChildExit = previousChildExit;
+    await previousChildExit;
+    if (session.previousChildExit === previousChildExit) {
+      session.previousChildExit = null;
+    }
+    if (session.closing) {
+      throw new CodexSessionReleasedError(
+        new Error(
+          "codex session was released while waiting for the previous app-server to exit",
+        ),
+      );
+    }
+  }
   if (args.request.kind === "resume") {
     announceSessionIdentity(session, args.request.providerThreadId);
   }
   sendThreadDeltas(session, [{ kind: "session.reset" }]);
 
   const connection = spawnChildConnection({
+    envVars: decoded.sessionOptions.envVars,
     recordThreadId: args.threadId,
     onNotification: (method, params) =>
       handleChildNotification(args.threadId, serial, method, params),
@@ -929,7 +1125,7 @@ async function constructThreadSession(
     };
 
     let method: string;
-    let params: BbThreadStartParams | ThreadResumeParams | BbThreadForkParams;
+    let params: BbThreadStartParams | BbThreadResumeParams | BbThreadForkParams;
     switch (args.request.kind) {
       case "start": {
         method = "thread/start";
@@ -943,8 +1139,9 @@ async function constructThreadSession(
       }
       case "resume": {
         method = "thread/resume";
-        const resumeParams: ThreadResumeParams = {
+        const resumeParams: BbThreadResumeParams = {
           threadId: args.request.providerThreadId,
+          excludeTurns: true,
           ...sharedConstructionParams,
         };
         params = resumeParams;
@@ -968,12 +1165,11 @@ async function constructThreadSession(
       }
     }
 
-    const result = await connection.request({
+    const result = await requestThreadConstructionWithWriterRetry(
+      connection,
       method,
       params,
-      resultSchema: codexThreadIdentityResultSchema,
-      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
-    });
+    );
     const codexThreadId = result.thread.id;
     session.codexThreadId = codexThreadId;
     translator.activateThreadGitWritableRoots({
@@ -988,7 +1184,7 @@ async function constructThreadSession(
       sessionsByBbThreadId.delete(args.threadId);
     }
     session.closing = true;
-    connection.kill();
+    await connection.kill();
     throw released ? new CodexSessionReleasedError(error) : error;
   }
 }
@@ -1017,12 +1213,16 @@ function registerResumableSession(session: CodexBridgeSession): void {
     construction: session.construction,
     constructionSignature: session.constructionSignature,
     openCodexTurnIds: new Set(),
+    responseOpenedTurns: new Map(),
+    unopenedCompactionDispatches: [],
     turnSettledWaiters: new Map(),
     awaitingReplayedUsage: true,
     identityAnnounced: session.identityAnnounced,
     pendingPreIdentityDeltas: [],
     rebuildBeforeNextTurnReason: null,
     closing: false,
+    previousChildExit: null,
+    releasePromise: null,
   });
 }
 
@@ -1084,7 +1284,7 @@ async function withMaintenanceChild<T>(
     return await fn(connection);
   } finally {
     maintenanceConnections.delete(connection);
-    connection.kill();
+    await connection.kill();
   }
 }
 
@@ -1120,7 +1320,7 @@ async function getModelListConnection(): Promise<CodexAppServerConnection> {
       return connection;
     } catch (error) {
       maintenanceConnections.delete(connection);
-      connection.kill();
+      await connection.kill();
       throw error;
     }
   })();
@@ -1292,9 +1492,152 @@ async function requireLiveSessionForTurn(
   return { session, connection: session.connection };
 }
 
+const codexTurnStartResultSchema = z
+  .object({ turn: codexTurnSchema })
+  .passthrough();
+
+function settleAcceptedDispatch(args: {
+  clientRequestId: TurnStartParamsShape["clientRequestId"];
+  compaction: boolean;
+  prepared: PreparedProviderCommandDispatch | null;
+  session: CodexBridgeSession;
+  result: unknown;
+}): void {
+  const { clientRequestId, prepared, session, result } = args;
+  if (args.compaction) {
+    const dispatch = session.unopenedCompactionDispatches.find(
+      (pending) => pending.clientRequestId === clientRequestId,
+    );
+    if (dispatch !== undefined) {
+      dispatch.accepted = true;
+      if (dispatch.outcome !== null) {
+        settleUnopenedDispatch(session, dispatch, dispatch.outcome);
+      }
+    }
+    return;
+  }
+  const parsed = codexTurnStartResultSchema.safeParse(result);
+  if (!parsed.success) {
+    scheduleZeroWorkTurnSettlement({ clientRequestId, prepared, session });
+    return;
+  }
+  if (prepared === null) {
+    return;
+  }
+  const live = currentSession(session.bbThreadId, session.serial);
+  if (!live || live.codexThreadId === null) {
+    return;
+  }
+  const codexTurnId = parsed.data.turn.id;
+  const turnAlreadyOpen = live.openCodexTurnIds.has(codexTurnId);
+  sendThreadDeltas(
+    live,
+    live.translator.openTurnFromStartResponse({
+      providerThreadId: live.codexThreadId,
+      turn: parsed.data.turn,
+      clientRequestId,
+      turnAlreadyOpen,
+    }),
+  );
+  if (
+    !turnAlreadyOpen &&
+    live.openCodexTurnIds.has(codexTurnId) &&
+    !live.responseOpenedTurns.has(codexTurnId)
+  ) {
+    live.responseOpenedTurns.set(codexTurnId, {
+      nativeStarted: false,
+      waiters: [],
+    });
+  }
+}
+
+function markResponseOpenedTurnNativelyStarted(
+  session: CodexBridgeSession,
+  codexTurnId: string,
+): void {
+  const turn = session.responseOpenedTurns.get(codexTurnId);
+  if (turn === undefined || turn.nativeStarted) {
+    return;
+  }
+  turn.nativeStarted = true;
+  const waiters = turn.waiters;
+  turn.waiters = [];
+  for (const resolve of waiters) {
+    resolve(true);
+  }
+}
+
+function settleResponseOpenedTurn(
+  session: CodexBridgeSession,
+  codexTurnId: string,
+): void {
+  const turn = session.responseOpenedTurns.get(codexTurnId);
+  if (turn === undefined) {
+    return;
+  }
+  session.responseOpenedTurns.delete(codexTurnId);
+  for (const resolve of turn.waiters) {
+    resolve(false);
+  }
+}
+
+function waitForNativeTurnStart(
+  session: CodexBridgeSession,
+  codexTurnId: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const turn = session.responseOpenedTurns.get(codexTurnId);
+  if (turn === undefined) {
+    return Promise.resolve(false);
+  }
+  if (turn.nativeStarted) {
+    return Promise.resolve(true);
+  }
+  return new Promise<boolean>((resolve) => {
+    const onStart = (started: boolean): void => {
+      clearTimeout(timer);
+      resolve(started);
+    };
+    const timer = setTimeout(() => {
+      turn.waiters = turn.waiters.filter((waiter) => waiter !== onStart);
+      resolve(false);
+    }, timeoutMs);
+    timer.unref?.();
+    turn.waiters.push(onStart);
+  });
+}
+
 const ZERO_WORK_SETTLEMENT_GRACE_MS = 250;
 
 let syntheticZeroWorkTurnCounter = 0;
+
+function settleUnopenedDispatch(
+  session: CodexBridgeSession,
+  dispatch: UnopenedDispatch,
+  outcome: UnopenedDispatchOutcome,
+): void {
+  if (!dispatch.prepared.claim()) {
+    return;
+  }
+  syntheticZeroWorkTurnCounter += 1;
+  const providerTurnId = `zero-work-${syntheticZeroWorkTurnCounter}`;
+  sendThreadDeltas(session, [
+    { kind: "turn.open", providerTurnId },
+    {
+      kind: "input.accepted",
+      clientRequestId: dispatch.clientRequestId,
+      providerTurnId,
+    },
+    outcome.status === "completed"
+      ? { kind: "turn.boundary", providerTurnId, status: "completed" }
+      : {
+          kind: "turn.boundary",
+          providerTurnId,
+          status: "failed",
+          error: outcome.error,
+        },
+  ]);
+}
 
 function scheduleZeroWorkTurnSettlement(args: {
   clientRequestId: TurnStartParamsShape["clientRequestId"];
@@ -1311,18 +1654,72 @@ function scheduleZeroWorkTurnSettlement(args: {
     if (!live || live.openCodexTurnIds.size > 0) {
       return;
     }
-    if (!prepared.claim()) {
-      return;
-    }
-    syntheticZeroWorkTurnCounter += 1;
-    const providerTurnId = `zero-work-${syntheticZeroWorkTurnCounter}`;
-    sendThreadDeltas(live, [
-      { kind: "turn.open", providerTurnId },
-      { kind: "input.accepted", clientRequestId, providerTurnId },
-      { kind: "turn.boundary", providerTurnId, status: "completed" },
-    ]);
+    settleUnopenedDispatch(
+      live,
+      { clientRequestId, prepared },
+      { status: "completed" },
+    );
   }, ZERO_WORK_SETTLEMENT_GRACE_MS);
   timer.unref?.();
+}
+
+function awaitCompactionTurn(args: {
+  clientRequestId: TurnStartParamsShape["clientRequestId"];
+  prepared: PreparedProviderCommandDispatch | null;
+  session: CodexBridgeSession;
+}): void {
+  const { clientRequestId, prepared, session } = args;
+  if (prepared === null) {
+    return;
+  }
+  const live = currentSession(session.bbThreadId, session.serial);
+  if (!live) {
+    return;
+  }
+  live.unopenedCompactionDispatches.push({
+    clientRequestId,
+    prepared,
+    accepted: false,
+    outcome: null,
+  });
+}
+
+function settleCompactionDispatchesWhenCodexIsNotRunning(
+  session: CodexBridgeSession,
+  params: unknown,
+): void {
+  if (session.unopenedCompactionDispatches.length === 0) {
+    return;
+  }
+  const parsed = codexThreadStatusChangedParamsSchema.safeParse(params);
+  if (
+    !parsed.success ||
+    parsed.data.threadId !== session.codexThreadId ||
+    session.openCodexTurnIds.size > 0
+  ) {
+    return;
+  }
+  const status = parsed.data.status.type;
+  if (status !== "idle" && status !== "systemError") {
+    return;
+  }
+  const outcome: UnopenedDispatchOutcome =
+    status === "idle"
+      ? { status: "completed" }
+      : {
+          status: "failed",
+          error: {
+            message:
+              "codex reported a system error before the compaction turn started",
+          },
+        };
+  for (const dispatch of session.unopenedCompactionDispatches) {
+    if (dispatch.accepted) {
+      settleUnopenedDispatch(session, dispatch, outcome);
+    } else {
+      dispatch.outcome = outcome;
+    }
+  }
 }
 
 async function handleTurnStart(
@@ -1355,9 +1752,16 @@ async function handleTurnStart(
     providerThreadId: codexThreadId,
   });
 
+  const compaction = isStandaloneBuiltinCompactCommand(input);
   try {
-    if (isStandaloneBuiltinCompactCommand(input)) {
-      await connection.request({
+    let result: unknown;
+    if (compaction) {
+      awaitCompactionTurn({
+        clientRequestId: params.clientRequestId,
+        prepared,
+        session,
+      });
+      result = await connection.request({
         method: "thread/compact/start",
         params: { threadId: codexThreadId },
         resultSchema: ignoredChildResultSchema,
@@ -1371,7 +1775,7 @@ async function handleTurnStart(
         ),
         options: decoded.sessionOptions,
       });
-      await connection.request({
+      result = await connection.request({
         method: "turn/start",
         params: {
           threadId: codexThreadId,
@@ -1387,12 +1791,18 @@ async function handleTurnStart(
       });
     }
     sendResult(id, { threadId: params.threadId });
-    scheduleZeroWorkTurnSettlement({
+    settleAcceptedDispatch({
       clientRequestId: params.clientRequestId,
+      compaction,
       prepared,
       session,
+      result,
     });
   } catch (error) {
+    session.unopenedCompactionDispatches =
+      session.unopenedCompactionDispatches.filter(
+        (dispatch) => dispatch.clientRequestId !== params.clientRequestId,
+      );
     prepared?.rollback();
     sendError(
       id,
@@ -1453,7 +1863,7 @@ async function handleThreadStop(
 
   if (params.intent === "release") {
     if (session) {
-      releaseSession(session);
+      await releaseSession(session);
     }
     sendResult(id, { ok: true });
     return;
@@ -1471,21 +1881,16 @@ async function handleThreadStop(
     return;
   }
 
-  try {
-    await session.connection.request({
-      method: "turn/interrupt",
-      params: {
-        threadId: session.codexThreadId,
-        turnId: params.activeTurnId,
-      },
-      resultSchema: ignoredChildResultSchema,
-      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
-    });
-  } catch (error) {
+  const interruptFailure = await interruptCodexTurn(
+    session,
+    session.codexThreadId,
+    params.activeTurnId,
+  );
+  if (interruptFailure !== null) {
     sendError(
       id,
       BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR,
-      error instanceof Error ? error.message : String(error),
+      interruptFailure.message,
     );
     return;
   }
@@ -1509,8 +1914,69 @@ async function handleThreadStop(
       providerThreadId: session.codexThreadId,
     }),
   );
-  releaseSession(session);
+  await releaseSession(session);
   sendResult(id, { ok: true });
+}
+
+async function requestCodexTurnInterrupt(
+  session: CodexBridgeSession,
+  codexThreadId: string,
+  codexTurnId: string,
+): Promise<Error | null> {
+  const connection = session.connection;
+  if (connection === null || connection.exited) {
+    return null;
+  }
+  try {
+    await connection.request({
+      method: "turn/interrupt",
+      params: { threadId: codexThreadId, turnId: codexTurnId },
+      resultSchema: ignoredChildResultSchema,
+      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+    });
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+async function interruptCodexTurn(
+  session: CodexBridgeSession,
+  codexThreadId: string,
+  codexTurnId: string,
+): Promise<Error | null> {
+  const responseOpened = session.responseOpenedTurns.get(codexTurnId);
+  const awaitingNativeStart =
+    responseOpened !== undefined && !responseOpened.nativeStarted;
+  const failure = await requestCodexTurnInterrupt(
+    session,
+    codexThreadId,
+    codexTurnId,
+  );
+  if (
+    failure === null ||
+    !awaitingNativeStart ||
+    !(failure instanceof CodexAppServerRpcError) ||
+    failure.code !== -32600 ||
+    failure.message !== "no active turn to interrupt"
+  ) {
+    return failure;
+  }
+  if (!session.openCodexTurnIds.has(codexTurnId)) {
+    return null;
+  }
+  const started = await waitForNativeTurnStart(
+    session,
+    codexTurnId,
+    INTERRUPT_SETTLEMENT_TIMEOUT_MS,
+  );
+  if (!session.openCodexTurnIds.has(codexTurnId)) {
+    return null;
+  }
+  if (!started) {
+    return failure;
+  }
+  return requestCodexTurnInterrupt(session, codexThreadId, codexTurnId);
 }
 
 function waitForCodexTurnSettlement(
@@ -1557,11 +2023,11 @@ async function handleThreadMaintenance(
     alreadyInRequestedState?: RegExp;
   },
 ): Promise<void> {
-  const settle = (): void => {
+  const settle = async (): Promise<void> => {
     if (options?.releaseAfter) {
       const session = sessionsByBbThreadId.get(params.threadId);
       if (session) {
-        releaseSession(session);
+        await releaseSession(session);
       }
     }
     sendResult(id, { ok: true });
@@ -1570,13 +2036,13 @@ async function handleThreadMaintenance(
     await withChildForThread(params.threadId, (connection) =>
       sendMaintenanceRequestWithRetries(connection, request),
     );
-    settle();
+    await settle();
   } catch (error) {
     if (
       error instanceof Error &&
       options?.alreadyInRequestedState?.test(error.message) === true
     ) {
-      settle();
+      await settle();
       return;
     }
     rejectWithCodexError(id, error);

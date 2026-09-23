@@ -1,3 +1,5 @@
+import { getLatestThreadSequence } from "@bb/db";
+import { emitPluginThreadEvents } from "../../../src/services/plugins/plugin-thread-events.js";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +8,12 @@ import { threadScope, turnScope } from "@bb/domain";
 import { applyLoggedThreadLifecycleEvent } from "../../../src/services/threads/lifecycle-outcome.js";
 import { createThreadRecord } from "../../../src/services/threads/thread-create-helpers.js";
 import type { ThreadCreateServiceRequest } from "../../../src/services/threads/thread-create-request.js";
-import { seedEvent, seedThreadFixture } from "../../helpers/seed.js";
+import {
+  seedEvent,
+  seedThreadFixture,
+  seedTurnStarted,
+} from "../../helpers/seed.js";
+import { createUserQuestionPayload } from "../../helpers/pending-interactions.js";
 import {
   createTestAppHarness,
   testLogger,
@@ -23,6 +30,15 @@ interface RecordedThreadPayload {
   };
   lastAssistantText?: string | null;
   error?: string | null;
+}
+
+interface RecordedInteractionPayload extends RecordedThreadPayload {
+  interaction: {
+    id: string;
+    payload: { kind: string };
+    status: string;
+    threadId: string;
+  };
 }
 
 const globals = globalThis as Record<string, unknown>;
@@ -197,6 +213,56 @@ describe("plugin thread lifecycle events", () => {
     }
   });
 
+  it("delivers interaction.pending after the interaction is committed", async () => {
+    const recorded: RecordedInteractionPayload[] = [];
+    globals.__pendingInteractionEvents = recorded;
+    const { harness, cleanup } = await setUpPluginHarness(`
+      export default function plugin(bb: any) {
+        bb.events.on("interaction.pending", (payload: any) => {
+          (globalThis as any).__pendingInteractionEvents.push(payload);
+        });
+      }
+    `);
+    try {
+      const { thread } = seedThreadFixture(harness, {
+        thread: { status: "active" },
+      });
+      seedTurnStarted(harness.deps, {
+        threadId: thread.id,
+        turnId: "turn-pending-event",
+        providerThreadId: "provider-thread-pending-event",
+      });
+
+      const result =
+        harness.deps.pendingInteractions.registerPendingInteraction({
+          interaction: {
+            threadId: thread.id,
+            turnId: "turn-pending-event",
+            providerId: "codex",
+            providerThreadId: "provider-thread-pending-event",
+            providerRequestId: "request-pending-event",
+            payload: createUserQuestionPayload({
+              prompt: "Deploy to production?",
+            }),
+          },
+        });
+
+      expect(result.outcome).toBe("created");
+      await vi.waitFor(() => expect(recorded).toHaveLength(1));
+      expect(recorded[0]?.thread).toMatchObject({
+        id: thread.id,
+        status: "active",
+      });
+      if (result.outcome === "rejected") {
+        throw new Error(result.reason);
+      }
+      expect(recorded[0]?.interaction).toEqual(result.interaction);
+    } finally {
+      delete globals.__pendingInteractionEvents;
+      await cleanup();
+    }
+  });
+
   it("delivers thread.created from the thread creation seam", async () => {
     const recorded: RecordedThreadPayload[] = [];
     globals.__createdEvents = recorded;
@@ -213,6 +279,7 @@ describe("plugin thread lifecycle events", () => {
         environment: { type: "reuse", environmentId: environment.id },
         input: [],
         origin: null,
+        pluginMetadata: null,
         projectId: project.id,
         providerId: "codex",
         startedOnBehalfOf: null,
@@ -259,6 +326,7 @@ describe("plugin thread lifecycle events", () => {
               input: [],
               origin: "plugin",
               originPluginId,
+              pluginMetadata: null,
               projectId: project.id,
               providerId: "codex",
               startedOnBehalfOf: null,
@@ -374,7 +442,7 @@ describe("plugin thread lifecycle events", () => {
       });
 
       const response = await harness.app.request(
-        `/api/v1/threads/${thread.id}/archive`,
+        `/api/v1/threads/${thread.id}/archive-all`,
         { method: "POST" },
       );
 
@@ -514,4 +582,48 @@ describe("plugin thread lifecycle events", () => {
       await cleanup();
     }
   });
+});
+
+it("coalesces thread appends and delivers current status without reading history", async () => {
+  const recorded: Array<{
+    thread: { id: string; status: string };
+    sequence: number;
+  }> = [];
+  globals.__sequenceEvents = recorded;
+  const { harness, cleanup } = await setUpPluginHarness(`
+    export default function plugin(bb) {
+      bb.events.on("experimental_thread.events", (payload) => {
+        globalThis.__sequenceEvents.push(payload);
+      });
+    }
+  `);
+  try {
+    const { thread } = seedThreadFixture(harness, {
+      thread: { status: "starting" },
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    for (let i = 0; i < 20; i++) emitPluginThreadEvents(thread.id);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(recorded).toHaveLength(0);
+    applyLoggedThreadLifecycleEvent(lifecycleDeps(harness), {
+      threadId: thread.id,
+      event: { type: "run.started" },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(recorded).toMatchObject([
+      {
+        thread: { id: thread.id, status: "active" },
+        sequence: getLatestThreadSequence(harness.db, { threadId: thread.id }),
+      },
+    ]);
+    emitPluginThreadEvents(thread.id);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(recorded).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(recorded).toHaveLength(2);
+  } finally {
+    vi.useRealTimers();
+    delete globals.__sequenceEvents;
+    await cleanup();
+  }
 });

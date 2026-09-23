@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { PLUGIN_CATALOG_CATEGORIES as BUILTIN_DISCOVERY_CATEGORIES } from "@bb/domain";
 import {
   deletePluginMarketplace,
   getInstalledPlugin,
@@ -17,20 +17,23 @@ import {
   type DbConnection,
   type PluginMarketplaceRow,
 } from "@bb/db";
-import type {
-  InstalledPlugin,
-  PluginCatalogAuthor,
-  PluginCatalogInstallPlan,
-  PluginCatalogResolvedSource,
-  PluginCatalogSearchResult,
-  PluginCatalogStatus,
-  PluginMarketplace,
-  PluginMarketplaceRefreshResult,
+import {
+  CURATED_PLUGIN_MARKETPLACE_NAME,
+  type InstalledPlugin,
+  type PluginCatalogAuthor,
+  type PluginCatalogCollection,
+  type PluginCatalogCollectionMembership,
+  type PluginCatalogInstallPlan,
+  type PluginCatalogResolvedSource,
+  type PluginCatalogSearchResult,
+  type PluginCatalogStatus,
+  type PluginMarketplace,
+  type PluginMarketplaceRefreshResult,
 } from "@bb/server-contract";
+import { brandingAssetHash } from "../plugins/app-bundle.js";
 import {
   builtinPluginSource,
   listBundledPluginRegistrations,
-  PLUGIN_CATALOG_CATEGORIES,
   type BundledPluginRegistration,
 } from "../plugins/builtin-registry.js";
 import {
@@ -38,6 +41,10 @@ import {
   type PluginManifest,
 } from "../plugins/manifest.js";
 import type { PluginService } from "../plugins/plugin-service.js";
+import {
+  SERVER_MOVE_FROZEN_RETRY_MS,
+  isServerMoveFrozen,
+} from "../server-move/freeze-state.js";
 import {
   evaluateCompatibility,
   listGitSemverTags,
@@ -55,14 +62,19 @@ import {
   type MarketplaceFetch,
 } from "./marketplace-http.js";
 import {
-  BUILTIN_PUBLISHER_KEY,
-  BUILTIN_PUBLISHER_LABEL,
+  BUNDLED_MARKETPLACE_NAME,
+  catalogEntryMetadata,
   entryIconName,
   entryIconTinted,
   entryRepositoryUrl,
+  entryOverview,
   entrySourceDisplay,
-  CURATED_MARKETPLACE_NAME,
+  curatedMarketplaceManifestUrls,
+  isBundledMarketplaceEntry,
+  marketplaceCollections,
+  marketplaceRowIconBase,
   parseMarketplaceManifestJson,
+  parseStoredMarketplaceManifest,
   resolvedEntrySource,
   type MarketplaceEntry,
   type MarketplaceManifest,
@@ -75,7 +87,9 @@ import {
   parseMarketplaceSource,
 } from "./marketplace-source.js";
 import { BUNDLED_CURATED_MARKETPLACE } from "./curated-marketplace.js";
+import { loadBundledMarketplace } from "./bundled-marketplace.js";
 import { marketplacePublisherLabel } from "./marketplace-publishers.js";
+import { createKeyedLock } from "../lib/async-deduper.js";
 
 const MARKETPLACE_REFRESH_INTERVAL_MS = 2 * 60 * 60 * 1_000;
 
@@ -98,12 +112,12 @@ interface PluginCatalogInstallInput extends PluginCatalogEntrySelector {
 
 export interface PluginCatalogService {
   status(): PluginCatalogStatus;
-  refresh(attemptedAt?: number): Promise<void>;
   refreshMarketplaces(args?: {
     name?: string;
     attemptedAt?: number;
   }): Promise<PluginMarketplaceRefreshResult[]>;
   search(query: string): Promise<PluginCatalogSearchResult[]>;
+  collections(): PluginCatalogCollection[];
   installPlan(
     selector: PluginCatalogEntrySelector,
   ): Promise<PluginCatalogInstallPlan>;
@@ -119,12 +133,19 @@ export interface PluginCatalogService {
   stopPeriodicRefresh(): void;
 }
 
-type ResolvedCatalogEntry =
-  | { kind: "marketplace"; row: PluginMarketplaceRow; entry: MarketplaceEntry }
-  | {
-      kind: "bundled";
-      entry: BundledPluginRegistration & { category: string };
-    };
+type ResolvedCatalogEntry = {
+  row: PluginMarketplaceRow;
+  entry: MarketplaceEntry;
+};
+
+interface ReservedCollectionIndex {
+  catalogsByMarketplace: ReadonlyMap<string, MarketplaceManifest>;
+  collections: readonly PluginCatalogCollection[];
+  membershipsByEntry: ReadonlyMap<
+    string,
+    readonly PluginCatalogCollectionMembership[]
+  >;
+}
 
 export function createPluginCatalogService(deps: {
   db: DbConnection;
@@ -137,38 +158,21 @@ export function createPluginCatalogService(deps: {
   >;
   bundledPlugins?: readonly BundledPluginRegistration[];
   fetch?: MarketplaceFetch;
-  now?: () => number;
-  schedule?: (callback: () => void, delayMs: number) => () => void;
   notifyCatalogChanged?: () => void;
   warn?: (message: string) => void;
 }): PluginCatalogService {
   const bundledPlugins =
     deps.bundledPlugins ?? listBundledPluginRegistrations();
-  const officialPlugins = bundledPlugins.map((plugin) => ({
-    ...plugin,
-    category: plugin.category ?? "Other",
-  }));
-  const categoryOrder = new Map<string, number>(
-    PLUGIN_CATALOG_CATEGORIES.map((category, index) => [category, index]),
+  const curatedManifestUrls = curatedMarketplaceManifestUrls(
+    deps.marketplaceUrl,
   );
-  const categoryByTag = new Map<string, string>(
-    PLUGIN_CATALOG_CATEGORIES.map((category) => [
-      category
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/gu, "-")
-        .replace(/^-+|-+$/gu, ""),
-      category,
+  const categoryOrder = new Map<string, number>(
+    BUILTIN_DISCOVERY_CATEGORIES.map((category, index) => [
+      category.displayName,
+      index,
     ]),
   );
-  const now = deps.now ?? Date.now;
   const fetchMarketplace = deps.fetch ?? publicMarketplaceFetch;
-  const schedule =
-    deps.schedule ??
-    ((callback: () => void, delayMs: number) => {
-      const timer = setTimeout(callback, delayMs);
-      timer.unref();
-      return () => clearTimeout(timer);
-    });
   const stagingDir = join(deps.dataDir, "marketplaces", "staging");
   let stagingReady: Promise<void> | null = null;
 
@@ -183,49 +187,79 @@ export function createPluginCatalogService(deps: {
     return stagingReady;
   }
 
-  seedOfficialMarketplace();
+  seedBundledMarketplace(Date.now());
+  seedCuratedMarketplace();
+  let reservedCollections = buildReservedCollectionIndex();
 
-  const locks = new Map<string, Promise<unknown>>();
+  const withLock = createKeyedLock<string>();
   const ADD_LOCK_KEY = "\0add";
   let cancelPeriodic: (() => void) | null = null;
   let periodicStopped = true;
 
-  function withLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
-    const previous = locks.get(key) ?? Promise.resolve();
-    const result = previous.then(operation, operation);
-    const tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    locks.set(key, tail);
-    return result.finally(() => {
-      if (locks.get(key) === tail) locks.delete(key);
+  function seedBundledMarketplace(refreshedAt: number): void {
+    const bundled = loadBundledMarketplace(bundledPlugins);
+    upsertPluginMarketplace(deps.db, {
+      name: BUNDLED_MARKETPLACE_NAME,
+      sourceKind: "path",
+      manifestUrl: bundled.directory,
+      sourceGitRef: null,
+      sourceGitCommit: null,
+      manifestJson: bundled.manifestJson,
+      statsJson: null,
+      etag: null,
+      lastModified: null,
+      lastSuccessfulRefreshAt: refreshedAt,
+      lastAttemptedRefreshAt: refreshedAt,
+      lastError: null,
     });
   }
 
-  function seedOfficialMarketplace(): void {
-    const existing = getPluginMarketplace(deps.db, CURATED_MARKETPLACE_NAME);
-    if (
-      existing !== undefined &&
-      existing.sourceKind === "https" &&
-      existing.manifestUrl === deps.marketplaceUrl
-    ) {
+  function seedCuratedMarketplace(): void {
+    const existing = getPluginMarketplace(
+      deps.db,
+      CURATED_PLUGIN_MARKETPLACE_NAME,
+    );
+    const isCurrentSource =
+      existing?.sourceKind === "https" &&
+      existing.manifestUrl === curatedManifestUrls.primary;
+    const isFallbackSource =
+      existing?.sourceKind === "https" &&
+      curatedManifestUrls.fallback !== null &&
+      existing.manifestUrl === curatedManifestUrls.fallback;
+    if (existing !== undefined && (isCurrentSource || isFallbackSource)) {
       try {
         parseMarketplaceManifestJson(
           existing.manifestJson,
           "stored marketplace catalog",
+          deps.warn,
         );
+        if (isFallbackSource) {
+          upsertPluginMarketplace(deps.db, {
+            name: CURATED_PLUGIN_MARKETPLACE_NAME,
+            sourceKind: "https",
+            manifestUrl: curatedManifestUrls.primary,
+            sourceGitRef: null,
+            sourceGitCommit: null,
+            manifestJson: existing.manifestJson,
+            statsJson: existing.statsJson,
+            etag: null,
+            lastModified: null,
+            lastSuccessfulRefreshAt: existing.lastSuccessfulRefreshAt,
+            lastAttemptedRefreshAt: existing.lastAttemptedRefreshAt,
+            lastError: existing.lastError,
+          });
+        }
         return;
       } catch (error) {
         deps.warn?.(
-          `stored ${CURATED_MARKETPLACE_NAME} catalog was rejected; using the bundled snapshot: ${marketplaceErrorMessage(error)}`,
+          `stored ${CURATED_PLUGIN_MARKETPLACE_NAME} catalog was rejected; using the bundled snapshot: ${marketplaceErrorMessage(error)}`,
         );
       }
     }
     upsertPluginMarketplace(deps.db, {
-      name: CURATED_MARKETPLACE_NAME,
+      name: CURATED_PLUGIN_MARKETPLACE_NAME,
       sourceKind: "https",
-      manifestUrl: deps.marketplaceUrl,
+      manifestUrl: curatedManifestUrls.primary,
       sourceGitRef: null,
       sourceGitCommit: null,
       manifestJson: JSON.stringify(BUNDLED_CURATED_MARKETPLACE),
@@ -246,10 +280,7 @@ export function createPluginCatalogService(deps: {
 
   function catalogOf(row: PluginMarketplaceRow): MarketplaceManifest | null {
     try {
-      return parseMarketplaceManifestJson(
-        row.manifestJson,
-        `stored "${row.name}" marketplace catalog`,
-      );
+      return parseStoredMarketplaceManifest(row, deps.warn);
     } catch (error) {
       deps.warn?.(marketplaceErrorMessage(error));
       return null;
@@ -258,10 +289,9 @@ export function createPluginCatalogService(deps: {
 
   function orderedMarketplaces(): PluginMarketplaceRow[] {
     return listPluginMarketplaces(deps.db).sort((left, right) => {
-      const officialDifference =
-        Number(right.name === CURATED_MARKETPLACE_NAME) -
-        Number(left.name === CURATED_MARKETPLACE_NAME);
-      return officialDifference || left.name.localeCompare(right.name);
+      const rankDifference =
+        marketplaceRank(left.name) - marketplaceRank(right.name);
+      return rankDifference || left.name.localeCompare(right.name);
     });
   }
 
@@ -271,7 +301,7 @@ export function createPluginCatalogService(deps: {
       name: row.name,
       displayName: catalog?.displayName ?? row.name,
       description: catalog?.description ?? null,
-      official: row.name === CURATED_MARKETPLACE_NAME,
+      official: isReservedMarketplace(row.name),
       sourceKind: row.sourceKind,
       source: marketplaceSourceDisplay(marketplaceSourceFromRow(row)),
       resolvedCommit: row.sourceGitCommit,
@@ -279,6 +309,46 @@ export function createPluginCatalogService(deps: {
       lastRefreshAt: row.lastSuccessfulRefreshAt,
       lastAttemptAt: row.lastAttemptedRefreshAt,
       lastError: row.lastError,
+    };
+  }
+
+  function buildReservedCollectionIndex(
+    overrides: ReadonlyMap<string, MarketplaceManifest> = new Map(),
+  ): ReservedCollectionIndex {
+    const catalogsByMarketplace = new Map<string, MarketplaceManifest>();
+    const collectionsByKey = new Map<string, PluginCatalogCollection>();
+    const membershipsByEntry = new Map<
+      string,
+      PluginCatalogCollectionMembership[]
+    >();
+    const marketplacesByExposedId = new Map<string, string>();
+    for (const row of orderedMarketplaces()) {
+      if (!isReservedMarketplace(row.name)) continue;
+      const catalog = overrides.get(row.name) ?? catalogOf(row);
+      if (catalog === null) continue;
+      catalogsByMarketplace.set(row.name, catalog);
+      for (const collection of marketplaceCollections(catalog)) {
+        const existingMarketplace = marketplacesByExposedId.get(collection.id);
+        if (existingMarketplace !== undefined) {
+          throw new Error(
+            `duplicate reserved marketplace collection id "${collection.id}" in "${existingMarketplace}" and "${row.name}"`,
+          );
+        }
+        marketplacesByExposedId.set(collection.id, row.name);
+        const collectionKey = catalogEntryKey(row.name, collection.id);
+        collectionsByKey.set(collectionKey, collection);
+        collection.pluginIds.forEach((pluginId, rank) => {
+          const entryKey = catalogEntryKey(row.name, pluginId);
+          const memberships = membershipsByEntry.get(entryKey) ?? [];
+          memberships.push({ id: collection.id, rank });
+          membershipsByEntry.set(entryKey, memberships);
+        });
+      }
+    }
+    return {
+      catalogsByMarketplace,
+      collections: [...collectionsByKey.values()],
+      membershipsByEntry,
     };
   }
 
@@ -309,6 +379,24 @@ export function createPluginCatalogService(deps: {
     });
   }
 
+  async function requireBundledManifest(
+    bundled: BundledPluginRegistration,
+  ): Promise<{ manifest: PluginManifest; problem: string | null }> {
+    const manifest = await entryManifest(bundled);
+    if (manifest === null) {
+      throw new Error(
+        `official plugin "${bundled.name}" is unavailable in this build`,
+      );
+    }
+    return {
+      manifest,
+      problem: compatibilityProblem({
+        bbRange: manifest.bbEngineRange,
+        sdkRange: manifest.bbPluginSdkRange,
+      }),
+    };
+  }
+
   async function bundledIcon(
     manifest: PluginManifest,
   ): Promise<{ bytes: Buffer; hash: string } | null> {
@@ -316,10 +404,7 @@ export function createPluginCatalogService(deps: {
     if (path === undefined) return null;
     try {
       const bytes = await readFile(path);
-      return {
-        bytes,
-        hash: createHash("sha256").update(bytes).digest("hex").slice(0, 16),
-      };
+      return { bytes, hash: brandingAssetHash(bytes) };
     } catch (error: unknown) {
       deps.warn?.(
         `bundled plugin ${manifest.id} icon is unreadable: ${
@@ -328,56 +413,6 @@ export function createPluginCatalogService(deps: {
       );
       return null;
     }
-  }
-
-  function bundledSearchResult(
-    entry: { name: string; pluginId: string; category: string },
-    manifest: PluginManifest,
-    iconHash: string | null,
-    installs: number | null,
-  ): PluginCatalogSearchResult {
-    const problem = compatibilityProblem({
-      bbRange: manifest.bbEngineRange,
-      sdkRange: manifest.bbPluginSdkRange,
-    });
-    return {
-      entryId: entry.name,
-      pluginId: entry.pluginId,
-      displayName: manifest.name,
-      description: manifest.description,
-      icon: manifest.branding.icon ?? null,
-      iconUrl:
-        iconHash === null
-          ? null
-          : entryIconAssetUrl(CURATED_MARKETPLACE_NAME, entry.name, iconHash),
-      iconTinted: iconHash !== null,
-      category: entry.category,
-      source: builtinPluginSource(entry.name),
-      repositoryUrl: null,
-      marketplace: CURATED_MARKETPLACE_NAME,
-      marketplaceDisplayName: BUNDLED_CURATED_MARKETPLACE.displayName,
-      publisherKey: BUILTIN_PUBLISHER_KEY,
-      publisherLabel: BUILTIN_PUBLISHER_LABEL,
-      official: true,
-      author: { name: "BB Team", url: "https://getbb.app" },
-      installed: getInstalledPlugin(deps.db, entry.pluginId) !== undefined,
-      installs,
-      compatible: problem === null,
-      incompatibleReason: problem,
-    };
-  }
-
-  function entryCategory(entry: MarketplaceEntry, official: boolean): string {
-    const tags = entry.tags ?? [];
-    if (official) {
-      for (const tag of tags) {
-        const category = categoryByTag.get(tag);
-        if (category !== undefined) return category;
-      }
-      return "Other";
-    }
-    const first = tags[0];
-    return first === undefined ? "Other" : titleCaseTag(first);
   }
 
   function entryIconAssetUrl(
@@ -401,23 +436,60 @@ export function createPluginCatalogService(deps: {
         };
   }
 
-  function catalogSearchResult(args: {
+  async function catalogSearchResult(args: {
     entry: MarketplaceEntry;
     row: PluginMarketplaceRow;
     catalog: MarketplaceManifest;
     installedEntryIds: ReadonlySet<string>;
     installs: number | null;
-  }): PluginCatalogSearchResult {
+    collections: readonly PluginCatalogCollectionMembership[];
+  }): Promise<PluginCatalogSearchResult | null> {
     const { entry, row, catalog } = args;
-    const official = row.name === CURATED_MARKETPLACE_NAME;
+    const official = isReservedMarketplace(row.name);
+    const bundled = bundledRegistration(entry);
+    const manifest =
+      bundled === undefined ? null : await entryManifest(bundled);
+    if (bundled !== undefined && manifest === null) return null;
+    const pluginId = bundled?.pluginId ?? entry.id;
+    const entryId = bundled?.name ?? entry.id;
+    const bundledIconAsset =
+      manifest === null ? null : await bundledIcon(manifest);
+    const iconAsset =
+      bundled === undefined
+        ? entryIconAsset(row.name, entry.id)
+        : bundledIconAsset === null
+          ? { iconUrl: null, iconTinted: false }
+          : {
+              iconUrl: entryIconAssetUrl(
+                row.name,
+                entryId,
+                bundledIconAsset.hash,
+              ),
+              iconTinted: true,
+            };
+    const compatibility =
+      manifest === null
+        ? null
+        : compatibilityProblem({
+            bbRange: manifest.bbEngineRange,
+            sdkRange: manifest.bbPluginSdkRange,
+          });
+    const metadata = catalogEntryMetadata({
+      manifest: catalog,
+      entry,
+      base: marketplaceRowIconBase(row),
+    });
+    const overview = entryOverview(entry, deps.warn);
     return {
-      entryId: entry.id,
-      pluginId: entry.id,
-      displayName: entry.displayName,
-      description: entry.description,
-      icon: entryIconName(entry),
-      ...entryIconAsset(row.name, entry.id),
-      category: entryCategory(entry, official),
+      entryId,
+      pluginId,
+      displayName: manifest?.name ?? entry.displayName,
+      description: manifest?.description ?? entry.description,
+      icon: manifest?.branding.icon ?? entryIconName(entry),
+      ...iconAsset,
+      ...metadata,
+      ...(overview === undefined ? {} : { overview }),
+      collections: [...args.collections],
       source: entrySourceDisplay(entry),
       repositoryUrl: entryRepositoryUrl(entry),
       marketplace: row.name,
@@ -430,12 +502,21 @@ export function createPluginCatalogService(deps: {
       official,
       author: entryAuthor(entry),
       installed:
-        args.installedEntryIds.has(catalogEntryKey(row.name, entry.id)) ||
-        getInstalledPlugin(deps.db, entry.id) !== undefined,
+        args.installedEntryIds.has(catalogEntryKey(row.name, entryId)) ||
+        getInstalledPlugin(deps.db, pluginId) !== undefined,
       installs: args.installs,
-      compatible: true,
-      incompatibleReason: null,
+      compatible: compatibility === null,
+      incompatibleReason: compatibility,
     };
+  }
+
+  function bundledRegistration(
+    entry: MarketplaceEntry,
+  ): BundledPluginRegistration | undefined {
+    if (!isBundledMarketplaceEntry(entry)) return undefined;
+    return bundledPlugins.find(
+      (plugin) => plugin.name === entry.source.bundled.plugin,
+    );
   }
 
   function rejectBundledIdCollisions(catalog: MarketplaceManifest): {
@@ -448,11 +529,15 @@ export function createPluginCatalogService(deps: {
     );
     if (colliding.length === 0) return { catalog, error: null };
     const ids = colliding.map((entry) => entry.id).join(", ");
+    const filteredCatalog = structuredClone(catalog);
+    for (const collidingEntry of colliding) {
+      const index = filteredCatalog.plugins.findIndex(
+        (entry) => entry.id === collidingEntry.id,
+      );
+      if (index >= 0) filteredCatalog.plugins.splice(index, 1);
+    }
     return {
-      catalog: {
-        ...catalog,
-        plugins: catalog.plugins.filter((entry) => !bundledIds.has(entry.id)),
-      },
+      catalog: filteredCatalog,
       error: `dropped ${colliding.length} catalog ${colliding.length === 1 ? "entry" : "entries"} whose id matches a bundled plugin: ${ids}`,
     };
   }
@@ -460,12 +545,15 @@ export function createPluginCatalogService(deps: {
   async function refreshedStatsJson(
     row: PluginMarketplaceRow,
   ): Promise<string | null> {
-    if (row.name !== CURATED_MARKETPLACE_NAME || row.sourceKind !== "https") {
+    if (
+      row.name !== CURATED_PLUGIN_MARKETPLACE_NAME ||
+      row.sourceKind !== "https"
+    ) {
       return null;
     }
     try {
       const stats = await fetchMarketplaceStats({
-        manifestUrl: row.manifestUrl,
+        manifestUrl: curatedManifestUrls.fallback ?? row.manifestUrl,
         fetch: fetchMarketplace,
       });
       return stats === null ? null : JSON.stringify(stats);
@@ -481,6 +569,12 @@ export function createPluginCatalogService(deps: {
     row: PluginMarketplaceRow,
     attemptedAt: number,
   ): Promise<void> {
+    if (row.name === BUNDLED_MARKETPLACE_NAME) {
+      seedBundledMarketplace(attemptedAt);
+      reservedCollections = buildReservedCollectionIndex();
+      deps.notifyCatalogChanged?.();
+      return;
+    }
     let collisionError: string | null = null;
     const source = marketplaceSourceFromRow(row);
     if (source.kind === "git") await prepareMarketplaceStaging();
@@ -493,6 +587,12 @@ export function createPluginCatalogService(deps: {
       },
       stagingDir,
       fetch: fetchMarketplace,
+      ...(deps.warn === undefined ? {} : { warn: deps.warn }),
+      ...(row.name === CURATED_PLUGIN_MARKETPLACE_NAME &&
+      row.sourceKind === "https" &&
+      curatedManifestUrls.fallback !== null
+        ? { fallbackManifestUrl: curatedManifestUrls.fallback }
+        : {}),
     });
     try {
       if (materialized.catalog.name !== row.name) {
@@ -502,6 +602,9 @@ export function createPluginCatalogService(deps: {
       }
       const rejection = rejectBundledIdCollisions(materialized.catalog);
       const catalog = rejection.catalog;
+      const nextReservedCollections = isReservedMarketplace(row.name)
+        ? buildReservedCollectionIndex(new Map([[row.name, catalog]]))
+        : null;
       collisionError = rejection.error;
       if (collisionError !== null) {
         deps.warn?.(`marketplace ${row.name} refresh ${collisionError}`);
@@ -535,6 +638,9 @@ export function createPluginCatalogService(deps: {
         });
         replacePluginMarketplaceIcons(tx, row.name, icons);
       });
+      if (nextReservedCollections !== null) {
+        reservedCollections = nextReservedCollections;
+      }
       deps.notifyCatalogChanged?.();
     } finally {
       await materialized.dispose();
@@ -577,7 +683,7 @@ export function createPluginCatalogService(deps: {
     name?: string;
     attemptedAt?: number;
   }): Promise<PluginMarketplaceRefreshResult[]> {
-    const attemptedAt = args?.attemptedAt ?? now();
+    const attemptedAt = args?.attemptedAt ?? Date.now();
     if (args?.name !== undefined) {
       requireRow(args.name);
       return [await refreshOne(args.name, attemptedAt)];
@@ -593,21 +699,32 @@ export function createPluginCatalogService(deps: {
     if (periodicStopped) return;
     cancelPeriodic?.();
     const lastAttempt = requireRow(
-      CURATED_MARKETPLACE_NAME,
+      CURATED_PLUGIN_MARKETPLACE_NAME,
     ).lastAttemptedRefreshAt;
     const delay =
       lastAttempt === null
         ? 0
         : Math.max(
             0,
-            MARKETPLACE_REFRESH_INTERVAL_MS - Math.max(0, now() - lastAttempt),
+            MARKETPLACE_REFRESH_INTERVAL_MS -
+              Math.max(0, Date.now() - lastAttempt),
           );
-    cancelPeriodic = schedule(runPeriodicRefresh, delay);
+    schedulePeriodicRefresh(delay);
+  }
+
+  function schedulePeriodicRefresh(delay: number): void {
+    const timer = setTimeout(runPeriodicRefresh, delay);
+    timer.unref();
+    cancelPeriodic = () => clearTimeout(timer);
   }
 
   function runPeriodicRefresh(): void {
     if (periodicStopped) return;
     cancelPeriodic = null;
+    if (isServerMoveFrozen(deps.db)) {
+      schedulePeriodicRefresh(SERVER_MOVE_FROZEN_RETRY_MS);
+      return;
+    }
     void refreshMarketplaces()
       .then((results) => {
         for (const result of results) {
@@ -631,15 +748,10 @@ export function createPluginCatalogService(deps: {
     const { entryId } = selector;
     if (selector.marketplace !== undefined) {
       const row = requireRow(selector.marketplace);
-      const entry = catalogOf(row)?.plugins.find(
-        (candidate) => candidate.id === entryId,
+      const entry = catalogOf(row)?.plugins.find((candidate) =>
+        entryMatchesSelector(candidate, entryId),
       );
-      if (entry !== undefined) return { kind: "marketplace", row, entry };
-      const bundled =
-        selector.marketplace === CURATED_MARKETPLACE_NAME
-          ? officialPlugins.find((candidate) => candidate.name === entryId)
-          : undefined;
-      if (bundled !== undefined) return { kind: "bundled", entry: bundled };
+      if (entry !== undefined) return { row, entry };
       throw new Error(
         `unknown marketplace entry "${entryId}@${selector.marketplace}"`,
       );
@@ -647,8 +759,8 @@ export function createPluginCatalogService(deps: {
     const matches: { row: PluginMarketplaceRow; entry: MarketplaceEntry }[] =
       [];
     for (const row of orderedMarketplaces()) {
-      const entry = catalogOf(row)?.plugins.find(
-        (candidate) => candidate.id === entryId,
+      const entry = catalogOf(row)?.plugins.find((candidate) =>
+        entryMatchesSelector(candidate, entryId),
       );
       if (entry !== undefined) matches.push({ row, entry });
     }
@@ -661,77 +773,54 @@ export function createPluginCatalogService(deps: {
       );
     }
     const only = matches[0];
-    if (only !== undefined) {
-      return { kind: "marketplace", row: only.row, entry: only.entry };
-    }
-    const bundled = officialPlugins.find(
-      (candidate) => candidate.name === entryId,
+    if (only !== undefined) return only;
+    throw new Error(`unknown plugin catalog entry "${entryId}"`);
+  }
+
+  function entryMatchesSelector(
+    entry: MarketplaceEntry,
+    entryId: string,
+  ): boolean {
+    return (
+      entry.id === entryId ||
+      (isBundledMarketplaceEntry(entry) &&
+        entry.source.bundled.plugin === entryId)
     );
-    if (bundled === undefined) {
-      throw new Error(`unknown plugin catalog entry "${entryId}"`);
-    }
-    return { kind: "bundled", entry: bundled };
   }
 
   async function resolveGitEntrySource(
     git: Extract<MarketplaceEntry["source"], { git: unknown }>["git"],
   ): Promise<PluginCatalogResolvedSource> {
-    const base = {
-      kind: "git" as const,
-      url: git.url,
-      ...(git.subdir === undefined ? {} : { subdir: git.subdir }),
-    };
+    const base = gitSourceView(git);
     try {
       if ("ref" in git) {
         const resolved = await resolveGitRef({ url: git.url, ref: git.ref });
         return resolved.outcome === "resolved"
-          ? { ...base, ref: git.ref, resolvedCommit: resolved.commit }
-          : { ...base, ref: git.ref, unresolvedReason: resolved.detail };
+          ? { ...base, resolvedCommit: resolved.commit }
+          : { ...base, unresolvedReason: resolved.detail };
       }
       const tagPrefix = git.tagPrefix ?? "";
       const tags = await listGitSemverTags({ url: git.url, tagPrefix });
       const selected = selectGitSemverTag({ tags, range: git.range });
-      const ranged = {
-        ...base,
-        range: git.range,
-        ...(git.tagPrefix === undefined ? {} : { tagPrefix: git.tagPrefix }),
-      };
       return selected === null
         ? {
-            ...ranged,
+            ...base,
             unresolvedReason: `no release tag of ${git.url} matches ${git.range}`,
           }
         : {
-            ...ranged,
+            ...base,
             resolvedTag: selected.tag,
             resolvedCommit: selected.commit,
           };
     } catch (error) {
-      return {
-        ...base,
-        ...("ref" in git
-          ? { ref: git.ref }
-          : {
-              range: git.range,
-              ...(git.tagPrefix === undefined
-                ? {}
-                : { tagPrefix: git.tagPrefix }),
-            }),
-        unresolvedReason: marketplaceErrorMessage(error),
-      };
+      return { ...base, unresolvedReason: marketplaceErrorMessage(error) };
     }
   }
 
   async function resolveNpmEntrySource(
     npm: Extract<MarketplaceEntry["source"], { npm: unknown }>["npm"],
   ): Promise<PluginCatalogResolvedSource> {
-    const base = {
-      kind: "npm" as const,
-      package: npm.package,
-      ...(npm.range === undefined ? {} : { range: npm.range }),
-      ...(npm.tag === undefined ? {} : { tag: npm.tag }),
-      ...(npm.registry === undefined ? {} : { registry: npm.registry }),
-    };
+    const base = npmSourceView(npm);
     try {
       const resolved = await deps.plugins.resolveCatalogNpmSource({
         packageName: npm.package,
@@ -763,35 +852,16 @@ export function createPluginCatalogService(deps: {
     entry: MarketplaceEntry,
     official: boolean,
   ): Promise<PluginCatalogResolvedSource> {
+    if ("bundled" in entry.source) {
+      throw new Error("a bundled marketplace entry has no remote source");
+    }
     if ("npm" in entry.source) {
       const npm = entry.source.npm;
-      if (official) {
-        return {
-          kind: "npm",
-          package: npm.package,
-          ...(npm.range === undefined ? {} : { range: npm.range }),
-          ...(npm.tag === undefined ? {} : { tag: npm.tag }),
-          ...(npm.registry === undefined ? {} : { registry: npm.registry }),
-        };
-      }
+      if (official) return npmSourceView(npm);
       return resolveNpmEntrySource(npm);
     }
     const git = entry.source.git;
-    if (official) {
-      return {
-        kind: "git",
-        url: git.url,
-        ...(git.subdir === undefined ? {} : { subdir: git.subdir }),
-        ...("ref" in git
-          ? { ref: git.ref }
-          : {
-              range: git.range,
-              ...(git.tagPrefix === undefined
-                ? {}
-                : { tagPrefix: git.tagPrefix }),
-            }),
-      };
-    }
+    if (official) return gitSourceView(git);
     return resolveGitEntrySource(git);
   }
 
@@ -804,6 +874,9 @@ export function createPluginCatalogService(deps: {
     entry: MarketplaceEntry,
     binding?: ConfirmedEntryBinding,
   ): Promise<InstalledPlugin> {
+    if (isBundledMarketplaceEntry(entry)) {
+      throw new Error("a bundled marketplace entry must install from disk");
+    }
     const resolved = resolvedEntrySource(entry);
     return deps.plugins.installCatalogPlugin({
       marketplace: row.name,
@@ -868,25 +941,14 @@ export function createPluginCatalogService(deps: {
         0,
       );
       return {
-        pluginCount: bundledPlugins.length + marketplaceEntryCount,
+        pluginCount: marketplaceEntryCount,
         includedPluginCount: bundledPlugins.filter(
           (plugin) => plugin.autoInstall,
         ).length,
         optionalPluginCount:
-          bundledPlugins.filter((plugin) => !plugin.autoInstall).length +
-          marketplaceEntryCount,
+          marketplaceEntryCount -
+          bundledPlugins.filter((plugin) => plugin.autoInstall).length,
       };
-    },
-
-    async refresh(attemptedAt = now()) {
-      const [result] = await refreshMarketplaces({
-        name: CURATED_MARKETPLACE_NAME,
-        attemptedAt,
-      });
-      scheduleNextPeriodicRefresh();
-      if (result !== undefined && !result.ok) {
-        throw new Error(result.error ?? "marketplace refresh failed");
-      }
     },
 
     refreshMarketplaces,
@@ -900,8 +962,13 @@ export function createPluginCatalogService(deps: {
           hash: row.contentHash,
         };
       }
-      if (marketplace !== CURATED_MARKETPLACE_NAME) return undefined;
-      const bundled = officialPlugins.find((entry) => entry.name === entryId);
+      if (marketplace !== BUNDLED_MARKETPLACE_NAME) return undefined;
+      const catalog = catalogOf(requireRow(BUNDLED_MARKETPLACE_NAME));
+      const entry = catalog?.plugins.find((candidate) =>
+        entryMatchesSelector(candidate, entryId),
+      );
+      const bundled =
+        entry === undefined ? undefined : bundledRegistration(entry);
       if (bundled === undefined) return undefined;
       const manifest = await entryManifest(bundled);
       const icon = manifest === null ? null : await bundledIcon(manifest);
@@ -918,6 +985,10 @@ export function createPluginCatalogService(deps: {
       return orderedMarketplaces().map(marketplaceView);
     },
 
+    collections() {
+      return [...reservedCollections.collections];
+    },
+
     async addMarketplace(rawSource) {
       return withLock(ADD_LOCK_KEY, async () => {
         const source = parseMarketplaceSource(rawSource);
@@ -927,12 +998,13 @@ export function createPluginCatalogService(deps: {
           cached: null,
           stagingDir,
           fetch: fetchMarketplace,
+          ...(deps.warn === undefined ? {} : { warn: deps.warn }),
         });
         try {
           const name = materialized.catalog.name;
-          if (name === CURATED_MARKETPLACE_NAME) {
+          if (isReservedMarketplace(name)) {
             throw new Error(
-              `marketplace name "${CURATED_MARKETPLACE_NAME}" is reserved for the marketplace BB curates`,
+              `marketplace name "${name}" is reserved for a marketplace that ships with bb`,
             );
           }
           if (getPluginMarketplace(deps.db, name) !== undefined) {
@@ -947,7 +1019,7 @@ export function createPluginCatalogService(deps: {
             fetch: fetchMarketplace,
             ...(deps.warn === undefined ? {} : { warn: deps.warn }),
           });
-          const addedAt = now();
+          const addedAt = Date.now();
           deps.db.transaction((tx) => {
             upsertPluginMarketplace(tx, {
               name,
@@ -973,10 +1045,8 @@ export function createPluginCatalogService(deps: {
 
     async removeMarketplace(name) {
       return withLock(name, async () => {
-        if (name === CURATED_MARKETPLACE_NAME) {
-          throw new Error(
-            `marketplace "${CURATED_MARKETPLACE_NAME}" cannot be removed`,
-          );
+        if (isReservedMarketplace(name)) {
+          throw new Error(`marketplace "${name}" cannot be removed`);
         }
         requireRow(name);
         const convertedPluginIds = deps.db.transaction((tx) => {
@@ -999,31 +1069,14 @@ export function createPluginCatalogService(deps: {
 
     async search(rawQuery) {
       const query = rawQuery.trim().toLowerCase();
+      const collectionIndex = reservedCollections;
       const curatedRow = getPluginMarketplace(
         deps.db,
-        CURATED_MARKETPLACE_NAME,
+        CURATED_PLUGIN_MARKETPLACE_NAME,
       );
       const curatedInstalls = installCountsFromStatsJson(
         curatedRow?.statsJson ?? null,
         (message) => deps.warn?.(message),
-      );
-      const bundledEntries = await Promise.all(
-        officialPlugins.map(async (entry) => {
-          const manifest = await entryManifest(entry);
-          if (manifest === null) return null;
-          const icon = await bundledIcon(manifest);
-          return {
-            pluginId: entry.pluginId,
-            tags: [] as string[],
-            marketplaceRank: 0,
-            result: bundledSearchResult(
-              entry,
-              manifest,
-              icon?.hash ?? null,
-              curatedInstalls.get(entry.pluginId) ?? null,
-            ),
-          };
-        }),
       );
       const installedEntryIds = new Set(
         listInstalledPlugins(deps.db)
@@ -1041,25 +1094,43 @@ export function createPluginCatalogService(deps: {
             catalogEntryKey(row.catalogMarketplaceName, row.catalogEntryId),
           ),
       );
-      const catalogEntries = orderedMarketplaces().flatMap((row, index) => {
-        const catalog = catalogOf(row);
-        if (catalog === null) return [];
-        const official = row.name === CURATED_MARKETPLACE_NAME;
-        return catalog.plugins.map((entry) => ({
-          pluginId: entry.id,
-          tags: entry.tags ?? [],
-          marketplaceRank: index,
-          result: catalogSearchResult({
-            entry,
-            row,
-            catalog,
-            installedEntryIds,
-            installs: official ? (curatedInstalls.get(entry.id) ?? null) : null,
-          }),
-        }));
-      });
-      return [...bundledEntries, ...catalogEntries]
-        .filter((entry) => entry !== null)
+      const catalogEntryPromises = orderedMarketplaces().flatMap(
+        (row, index) => {
+          const catalog = isReservedMarketplace(row.name)
+            ? (collectionIndex.catalogsByMarketplace.get(row.name) ?? null)
+            : catalogOf(row);
+          if (catalog === null) return [];
+          return catalog.plugins.map(async (entry) => {
+            const bundled = bundledRegistration(entry);
+            const pluginId = bundled?.pluginId ?? entry.id;
+            const result = await catalogSearchResult({
+              entry,
+              row,
+              catalog,
+              installedEntryIds,
+              installs: isReservedMarketplace(row.name)
+                ? (curatedInstalls.get(pluginId) ?? null)
+                : null,
+              collections:
+                collectionIndex.membershipsByEntry.get(
+                  catalogEntryKey(row.name, entry.id),
+                ) ?? [],
+            });
+            return result === null
+              ? null
+              : {
+                  pluginId,
+                  tags: entry.tags ?? [],
+                  marketplaceRank: index,
+                  result,
+                };
+          });
+        },
+      );
+      const catalogEntries = (await Promise.all(catalogEntryPromises)).filter(
+        (entry) => entry !== null,
+      );
+      return catalogEntries
         .filter(
           (entry) =>
             query.length === 0 ||
@@ -1068,7 +1139,7 @@ export function createPluginCatalogService(deps: {
               entry.pluginId,
               entry.result.displayName,
               entry.result.description,
-              entry.result.category,
+              entry.result.category ?? "",
               entry.result.marketplaceDisplayName,
               ...entry.tags,
             ]
@@ -1080,12 +1151,14 @@ export function createPluginCatalogService(deps: {
           const marketplaceDifference =
             left.marketplaceRank - right.marketplaceRank;
           if (marketplaceDifference !== 0) return marketplaceDifference;
+          const leftCategory = left.result.category ?? "";
+          const rightCategory = right.result.category ?? "";
           const categoryDifference =
-            (categoryOrder.get(left.result.category) ?? categoryOrder.size) -
-            (categoryOrder.get(right.result.category) ?? categoryOrder.size);
+            (categoryOrder.get(leftCategory) ?? categoryOrder.size) -
+            (categoryOrder.get(rightCategory) ?? categoryOrder.size);
           return (
             categoryDifference ||
-            left.result.category.localeCompare(right.result.category) ||
+            leftCategory.localeCompare(rightCategory) ||
             left.result.displayName.localeCompare(right.result.displayName)
           );
         })
@@ -1094,29 +1167,21 @@ export function createPluginCatalogService(deps: {
 
     async installPlan(selector) {
       const resolved = resolveEntry(selector);
-      if (resolved.kind === "bundled") {
-        const manifest = await entryManifest(resolved.entry);
-        if (manifest === null) {
-          throw new Error(
-            `official plugin "${resolved.entry.name}" is unavailable in this build`,
-          );
-        }
-        const problem = compatibilityProblem({
-          bbRange: manifest.bbEngineRange,
-          sdkRange: manifest.bbPluginSdkRange,
-        });
+      const bundled = bundledRegistration(resolved.entry);
+      if (bundled !== undefined) {
+        const { manifest, problem } = await requireBundledManifest(bundled);
         return {
           kind: "bundled",
-          entryId: resolved.entry.name,
-          pluginId: resolved.entry.pluginId,
+          entryId: bundled.name,
+          pluginId: bundled.pluginId,
           displayName: manifest.name,
-          source: builtinPluginSource(resolved.entry.name),
+          source: builtinPluginSource(bundled.name),
           compatible: problem === null,
           incompatibleReason: problem,
         };
       }
       const { row, entry } = resolved;
-      const official = row.name === CURATED_MARKETPLACE_NAME;
+      const official = isReservedMarketplace(row.name);
       return {
         kind: "marketplace",
         entryId: entry.id,
@@ -1135,49 +1200,36 @@ export function createPluginCatalogService(deps: {
 
     async install(input) {
       const resolved = resolveEntry(input);
-      if (resolved.kind === "marketplace") {
-        return withLock(resolved.row.name, async () => {
-          const current = resolveEntry({
-            ...input,
-            marketplace: resolved.row.name,
-          });
-          if (current.kind !== "marketplace") {
-            throw new Error(
-              `install refused: "${input.entryId}" is no longer listed by marketplace "${resolved.row.name}"`,
-            );
-          }
-          const thirdParty = current.row.name !== CURATED_MARKETPLACE_NAME;
-          if (!thirdParty && input.confirmedSource !== undefined) {
+      return withLock(resolved.row.name, async () => {
+        const current = resolveEntry({
+          ...input,
+          marketplace: resolved.row.name,
+        });
+        const bundled = bundledRegistration(current.entry);
+        if (bundled !== undefined) {
+          if (input.confirmedSource !== undefined) {
             throw new Error(
               "install refused: confirmedSource applies only to third-party marketplaces",
             );
           }
-          const binding = thirdParty
-            ? await confirmedThirdPartySource({
-                entry: current.entry,
-                confirmed: input.confirmedSource,
-              })
-            : undefined;
-          return installMarketplaceEntry(current.row, current.entry, binding);
-        });
-      }
-      if (input.confirmedSource !== undefined) {
-        throw new Error(
-          "install refused: confirmedSource applies only to third-party marketplaces",
-        );
-      }
-      const manifest = await entryManifest(resolved.entry);
-      if (manifest === null) {
-        throw new Error(
-          `official plugin "${resolved.entry.name}" is unavailable in this build`,
-        );
-      }
-      const problem = compatibilityProblem({
-        bbRange: manifest.bbEngineRange,
-        sdkRange: manifest.bbPluginSdkRange,
+          const { problem } = await requireBundledManifest(bundled);
+          if (problem !== null) throw new Error(`install refused: ${problem}`);
+          return deps.plugins.installOfficialPlugin(bundled.name);
+        }
+        const thirdParty = !isReservedMarketplace(current.row.name);
+        if (!thirdParty && input.confirmedSource !== undefined) {
+          throw new Error(
+            "install refused: confirmedSource applies only to third-party marketplaces",
+          );
+        }
+        const binding = thirdParty
+          ? await confirmedThirdPartySource({
+              entry: current.entry,
+              confirmed: input.confirmedSource,
+            })
+          : undefined;
+        return installMarketplaceEntry(current.row, current.entry, binding);
       });
-      if (problem !== null) throw new Error(`install refused: ${problem}`);
-      return deps.plugins.installOfficialPlugin(resolved.entry.name);
     },
 
     startPeriodicRefresh() {
@@ -1194,8 +1246,49 @@ export function createPluginCatalogService(deps: {
   };
 }
 
+function gitSourceView(
+  git: Extract<MarketplaceEntry["source"], { git: unknown }>["git"],
+): Extract<PluginCatalogResolvedSource, { kind: "git" }> {
+  return {
+    kind: "git",
+    url: git.url,
+    ...(git.subdir === undefined ? {} : { subdir: git.subdir }),
+    ...("ref" in git
+      ? { ref: git.ref }
+      : {
+          range: git.range,
+          ...(git.tagPrefix === undefined ? {} : { tagPrefix: git.tagPrefix }),
+        }),
+  };
+}
+
+function npmSourceView(
+  npm: Extract<MarketplaceEntry["source"], { npm: unknown }>["npm"],
+): Extract<PluginCatalogResolvedSource, { kind: "npm" }> {
+  return {
+    kind: "npm",
+    package: npm.package,
+    ...(npm.range === undefined ? {} : { range: npm.range }),
+    ...(npm.tag === undefined ? {} : { tag: npm.tag }),
+    ...(npm.registry === undefined ? {} : { registry: npm.registry }),
+  };
+}
+
 function catalogEntryKey(marketplace: string, entryId: string): string {
   return `${marketplace}\u0000${entryId}`;
+}
+
+function isReservedMarketplace(name: string): boolean {
+  return (
+    name === BUNDLED_MARKETPLACE_NAME ||
+    name === CURATED_PLUGIN_MARKETPLACE_NAME
+  );
+}
+
+function marketplaceRank(name: string): number {
+  if (name === BUNDLED_MARKETPLACE_NAME) return 0;
+  if (name === CURATED_PLUGIN_MARKETPLACE_NAME) return 1;
+  return 2;
 }
 
 function entryAuthor(entry: MarketplaceEntry): PluginCatalogAuthor {
@@ -1204,13 +1297,9 @@ function entryAuthor(entry: MarketplaceEntry): PluginCatalogAuthor {
     (entry.author.github === undefined
       ? null
       : `https://github.com/${entry.author.github}`);
-  return { name: entry.author.name, url };
-}
-
-function titleCaseTag(tag: string): string {
-  return tag
-    .split("-")
-    .filter((word) => word.length > 0)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
+  return {
+    name: entry.author.name,
+    github: entry.author.github ?? null,
+    url,
+  };
 }

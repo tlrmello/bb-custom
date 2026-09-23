@@ -1,3 +1,5 @@
+import { sleep, waitForChildExit } from "./child-process-helpers.mjs";
+import { appendOutput, formatProcessOutput } from "./smoke-output.mjs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -10,6 +12,7 @@ import {
 } from "./desktop-release-channel.mjs";
 import { createPackagedAppLaunchArguments } from "./packaged-app-launch.mjs";
 import { resolvePackagedAppBinary } from "./packaged-app-paths.mjs";
+import { smokePackagedNpm } from "./smoke-packaged-npm.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopPackageRoot = resolve(scriptDirectory, "..");
@@ -20,8 +23,6 @@ const startupTimeoutMs = 20_000;
 const exitTimeoutMs = 5_000;
 const outputFlushTimeoutMs = 2_000;
 const postReadySettleMs = 300;
-const maxCapturedOutputCharacters = 20_000;
-
 function writeJson(response, body) {
   response.writeHead(200, {
     "content-type": "application/json",
@@ -217,26 +218,6 @@ async function startSmokeServer({
   };
 }
 
-function appendOutput(chunks, chunk) {
-  chunks.push(String(chunk));
-  let totalLength = chunks.reduce((total, value) => total + value.length, 0);
-  while (totalLength > maxCapturedOutputCharacters && chunks.length > 1) {
-    const removed = chunks.shift();
-    totalLength -= removed.length;
-  }
-}
-
-function formatProcessOutput({ stdout, stderr }) {
-  const stdoutText = stdout.join("").trim();
-  const stderrText = stderr.join("").trim();
-  return [
-    stdoutText.length > 0 ? `stdout:\n${stdoutText}` : "",
-    stderrText.length > 0 ? `stderr:\n${stderrText}` : "",
-  ]
-    .filter((part) => part.length > 0)
-    .join("\n\n");
-}
-
 async function waitForOutputFlush(child) {
   await Promise.race([
     new Promise((resolveClosed) => {
@@ -310,49 +291,18 @@ async function waitForPreloadReady({ child, preloadReady, stdout, stderr }) {
   });
 }
 
-async function sleep(delayMs) {
-  await new Promise((resolvePromise) => {
-    setTimeout(resolvePromise, delayMs);
-  });
-}
-
-async function waitForProcessExit(child, timeoutMs) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return true;
-  }
-
-  return await new Promise((resolvePromise) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      resolvePromise(false);
-    }, timeoutMs);
-
-    const handleExit = () => {
-      cleanup();
-      resolvePromise(true);
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      child.off("exit", handleExit);
-    };
-
-    child.once("exit", handleExit);
-  });
-}
-
 async function stopPackagedApp(child) {
-  if (await waitForProcessExit(child, 0)) {
+  if (await waitForChildExit(child, 0)) {
     return;
   }
 
   child.kill("SIGTERM");
-  if (await waitForProcessExit(child, exitTimeoutMs)) {
+  if (await waitForChildExit(child, exitTimeoutMs)) {
     return;
   }
 
   child.kill("SIGKILL");
-  await waitForProcessExit(child, exitTimeoutMs);
+  await waitForChildExit(child, exitTimeoutMs);
 }
 
 async function smokePackagedApp() {
@@ -368,6 +318,7 @@ async function smokePackagedApp() {
     productName: releaseConfig.applicationName,
     releaseDir,
   });
+  await smokePackagedNpm(appBinary);
   const smokeRoot = await mkdtemp(join(tmpdir(), "bb-desktop-packaged-smoke-"));
   const dataDir = join(smokeRoot, "data");
   const userDataDir = join(smokeRoot, "user-data");

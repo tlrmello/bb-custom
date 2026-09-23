@@ -6,12 +6,13 @@ import {
   type PageToShellMessage,
   type ShellToPageEvent,
 } from "@bb/mobile-bridge";
-import * as Notifications from "expo-notifications";
 import { useCallback, useMemo, useRef } from "react";
 import { Linking, Platform, Share } from "react-native";
 import type { WebView, WebViewMessageEvent } from "react-native-webview";
+import { describeError } from "@/lib/describe-error";
 import { haptic } from "@/lib/haptics";
 import { buildBridgeSharePayload, isExternallyOpenable } from "@/lib/shell";
+import { updateAppBadgeCount } from "@/notifications/AppBadgeSync";
 
 export interface ShellBridgeCallbacks {
   onReady(path: string): void;
@@ -22,12 +23,6 @@ export interface ShellBridgeCallbacks {
 export interface ShellBridge {
   onMessage(event: WebViewMessageEvent): void;
   send(event: ShellToPageEvent): void;
-}
-
-async function setBadgeCount(count: number): Promise<void> {
-  try {
-    await Notifications.setBadgeCountAsync(count);
-  } catch {}
 }
 
 export function useShellBridge(
@@ -64,7 +59,7 @@ export function useShellBridge(
           haptic(message.kind);
           return;
         case "badge":
-          await setBadgeCount(message.count);
+          updateAppBadgeCount(message.count);
           return;
         case "open-native":
           callbacksRef.current.onOpenNative(message.screen);
@@ -92,7 +87,7 @@ export function useShellBridge(
             } catch (error) {
               respond(message.id, {
                 ok: false,
-                error: error instanceof Error ? error.message : String(error),
+                error: describeError(error),
               });
             }
           }

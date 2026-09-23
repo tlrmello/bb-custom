@@ -10,7 +10,6 @@ function makeAdapter(staticProviderOptions?: Record<string, unknown>) {
       supportsThreadArchive: false,
       supportsThreadRename: false,
       supportsServiceTier: false,
-      supportsNativeUserQuestion: false,
       fork: "checkpoint",
       permissionModes: ["full"],
     },
@@ -293,7 +292,6 @@ describe("options mapping", () => {
     const options = (plan as { params: { options: Record<string, unknown> } })
       .params.options;
     expect(options).not.toHaveProperty("memoryEnabled");
-    expect(options).not.toHaveProperty("skillRoots");
   });
 });
 
@@ -388,6 +386,27 @@ describe("translateEvent", () => {
         },
       }),
     ).toStrictEqual([]);
+
+    expect(
+      adapter.translateEvent({
+        jsonrpc: "2.0",
+        method: "session/replaced",
+        params: {
+          threadId: "thr_1",
+          providerThreadId: "p_2",
+          reason:
+            "Execution settings changed; the Claude session was rebuilt to apply them.",
+          contextLost: false,
+          showRuntimeNote: true,
+        },
+      }),
+    ).toMatchObject([
+      {
+        type: "provider/warning",
+        summary:
+          "Execution settings changed; the Claude session was rebuilt to apply them.",
+      },
+    ]);
 
     const events = adapter.translateEvent({
       jsonrpc: "2.0",

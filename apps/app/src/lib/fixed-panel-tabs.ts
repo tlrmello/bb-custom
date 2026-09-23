@@ -12,9 +12,11 @@ import { atomWithStorage } from "jotai/utils";
 import { atomFamily } from "jotai-family";
 import type { TerminalCreateTarget } from "@bb/server-contract";
 import { createLocalStorageSyncStorage } from "./browser-storage";
+import { hasThreadId } from "./thread-id";
 import { useThreadTabs } from "@/hooks/queries/thread-tabs-query";
 import {
   closeSecondaryPanelTabInState,
+  setSecondaryPanelTabsInState,
   reconcileFixedPanelViewTabsInState,
 } from "@bb/client-core";
 import {
@@ -61,10 +63,6 @@ type FixedPanelSecondaryPanelCloser = () => void;
 type FixedPanelTerminalIdSetter = (terminalId: string | null) => void;
 type FixedPanelTerminalIdRemover = (terminalId: string) => void;
 
-function hasThreadId(threadId: string | null | undefined): threadId is string {
-  return threadId !== null && threadId !== undefined && threadId.length > 0;
-}
-
 function touchFixedPanelTabsState(
   state: FixedPanelTabsState,
   now: number,
@@ -92,7 +90,11 @@ const fixedPanelTabsStateAtomFamily = atomFamily((threadId: string) =>
   atomWithStorage<FixedPanelTabsState>(
     getFixedPanelTabsStateStorageKey({ threadId }),
     EMPTY_FIXED_PANEL_TABS_STATE,
-    fixedPanelTabsStateStorage,
+    {
+      getItem: fixedPanelTabsStateStorage.getItem,
+      setItem: fixedPanelTabsStateStorage.setItem,
+      removeItem: fixedPanelTabsStateStorage.removeItem,
+    },
     { getOnInit: true },
   ),
 );
@@ -236,7 +238,9 @@ const FIXED_PANEL_TABS_STORAGE_PRUNE_FALLBACK_DELAY_MS = 1_500;
 
 function scheduleIdleFixedPanelTabsStoragePrune(): void {
   const run = () => {
-    pruneFixedPanelTabsStorage({ now: Date.now() });
+    try {
+      pruneFixedPanelTabsStorage({ now: Date.now() });
+    } catch {}
   };
   if (typeof window === "undefined") {
     return;
@@ -330,6 +334,7 @@ export function useUpdateFixedPanelTabsState(
         )
       ) {
         scheduleThreadTabsPersistence({
+          previousTabs: current.secondary.tabs,
           tabs: touched.secondary.tabs,
           queryClient,
           threadId: syncThreadId,
@@ -510,21 +515,12 @@ export function useSetFixedRightTerminalActiveTerminal(
           terminalId,
           target,
         }).id;
-        if (
-          tabs === current.secondary.tabs &&
-          current.secondary.activeTabId === activeTabId &&
-          current.secondary.isOpen
-        ) {
-          return current;
-        }
-        return {
-          ...current,
-          secondary: {
-            tabs,
-            activeTabId,
-            isOpen: true,
-          },
-        };
+        return setSecondaryPanelTabsInState({
+          state: current,
+          tabs,
+          activeTabId,
+          isOpen: true,
+        });
       });
     },
     [target, updateState],
@@ -542,8 +538,7 @@ export function useRemoveFixedRightTerminalTab(
       let didCloseLastTab = false;
       updateState((current) => {
         const next = removeFixedRightTerminalTabInState(current, terminalId);
-        didCloseLastTab =
-          next !== current && next.secondary.tabs.length === 0;
+        didCloseLastTab = next !== current && next.secondary.tabs.length === 0;
         return next;
       });
       if (didCloseLastTab) onCloseLastTab?.();

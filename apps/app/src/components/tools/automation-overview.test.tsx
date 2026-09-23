@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompactViewportOverrideProvider } from "@bb/shared-ui/hooks/use-compact-viewport";
 import { AutomationOverviewView } from "bb-plugin-automations/overview-view";
+import { focusWithKeyboard } from "@/test/keyboard-focus";
 import type {
   AutomationResponse,
   AutomationsOverviewResponse,
@@ -96,6 +103,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={() => {}}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={() => {}}
         activeMode="installed"
         onModeChange={() => {}}
@@ -124,6 +133,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={() => {}}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={() => {}}
         activeMode="installed"
         onModeChange={() => {}}
@@ -173,6 +184,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={onOpenDetail}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={() => {}}
         activeMode="installed"
         onModeChange={() => {}}
@@ -183,6 +196,16 @@ describe("AutomationOverviewView", () => {
     expect(screen.getByText("Unreadable automation")).toBeTruthy();
     expect(screen.getByText("Nightly digest")).toBeTruthy();
     expect(screen.getAllByText("9AM")).toHaveLength(2);
+
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Needs a prompt actions" }),
+    );
+    expect(
+      (screen.getByRole("menuitem", { name: "Run now" }) as HTMLElement)
+        .ariaDisabled,
+    ).toBe("true");
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
 
     const search = screen.getByPlaceholderText("Search automations");
     fireEvent.change(search, { target: { value: "Prompt required" } });
@@ -210,6 +233,89 @@ describe("AutomationOverviewView", () => {
     expect(screen.getAllByRole("button", { name: "Edit" })).toHaveLength(1);
   });
 
+  it("runs an automation from its row without opening the detail", async () => {
+    const onOpenDetail = vi.fn();
+    let resolveRun: (() => void) | null = null;
+    const onRunNow = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRun = resolve;
+        }),
+    );
+    render(
+      <AutomationOverviewView
+        entries={INSTALLED_AUTOMATIONS}
+        error={null}
+        onRetry={() => {}}
+        onOpenDetail={onOpenDetail}
+        onEnabledChange={async () => {}}
+        onRunNow={onRunNow}
+        onDelete={() => {}}
+        onCreateViaChat={() => {}}
+        activeMode="installed"
+        onModeChange={() => {}}
+      />,
+    );
+
+    const actions = () =>
+      screen.getByRole("button", { name: "Nightly digest actions" });
+    const enabledSwitch = screen.getByRole("switch", {
+      name: "Disable Nightly digest",
+    });
+    expect(enabledSwitch.compareDocumentPosition(actions())).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(actions().parentElement?.className).not.toContain("opacity-0");
+    fireEvent.pointerDown(actions());
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Run now" }));
+
+    expect(onRunNow).toHaveBeenCalledWith({
+      projectId: "proj_1",
+      automationId: "auto_1",
+    });
+    expect(onOpenDetail).not.toHaveBeenCalled();
+    expect(actions()).toHaveProperty("disabled", true);
+
+    await act(async () => {
+      resolveRun?.();
+    });
+    expect(actions()).toHaveProperty("disabled", false);
+    expect(screen.queryByRole("menuitem", { name: "Run now" })).toBeNull();
+  });
+
+  it("uses the shared row menu to request deletion", async () => {
+    const onOpenDetail = vi.fn();
+    const onDelete = vi.fn();
+    render(
+      <AutomationOverviewView
+        entries={INSTALLED_AUTOMATIONS}
+        error={null}
+        onRetry={() => {}}
+        onOpenDetail={onOpenDetail}
+        onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={onDelete}
+        onCreateViaChat={() => {}}
+        activeMode="installed"
+        onModeChange={() => {}}
+      />,
+    );
+
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Nightly digest actions" }),
+    );
+    expect(
+      screen.getAllByRole("menuitem").map((item) => item.textContent),
+    ).toEqual(["Run now", "Delete"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+
+    expect(onDelete).toHaveBeenCalledWith(
+      { projectId: "proj_1", automationId: "auto_1" },
+      "Nightly digest",
+    );
+    expect(onOpenDetail).not.toHaveBeenCalled();
+  });
+
   it("offers Projects and Status as groups inside one filter menu", async () => {
     render(
       <AutomationOverviewView
@@ -218,6 +324,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={() => {}}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={() => {}}
         activeMode="installed"
         onModeChange={() => {}}
@@ -227,7 +335,7 @@ describe("AutomationOverviewView", () => {
     expect(screen.queryByRole("button", { name: "Projects" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Status" })).toBeNull();
     const filtersTrigger = screen.getByRole("button", { name: "Filters" });
-    fireEvent.focus(filtersTrigger);
+    focusWithKeyboard(filtersTrigger);
     expect((await screen.findByRole("tooltip")).textContent).toBe(
       "Filters: All",
     );
@@ -261,6 +369,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={() => {}}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={() => {}}
         activeMode="installed"
         onModeChange={() => {}}
@@ -322,6 +432,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={() => {}}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={() => {}}
         activeMode="installed"
         onModeChange={() => {}}
@@ -375,6 +487,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={() => {}}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={() => {}}
         activeMode="installed"
         onModeChange={() => {}}
@@ -414,6 +528,8 @@ describe("AutomationOverviewView", () => {
           onRetry={() => {}}
           onOpenDetail={() => {}}
           onEnabledChange={async () => {}}
+          onRunNow={async () => {}}
+          onDelete={() => {}}
           onCreateViaChat={() => {}}
           activeMode="installed"
           onModeChange={() => {}}
@@ -462,6 +578,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={() => {}}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={onCreateViaChat}
         activeMode="browse"
         onModeChange={() => {}}
@@ -497,6 +615,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={() => {}}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={() => {}}
         activeMode="installed"
         onModeChange={() => {}}
@@ -521,8 +641,42 @@ describe("AutomationOverviewView", () => {
     expect(nextRunIcon).toBeTruthy();
     expect(screen.queryByText("Next")).toBeNull();
 
-    fireEvent.focus(nextRunIcon);
+    focusWithKeyboard(nextRunIcon);
     expect((await screen.findByRole("tooltip")).textContent).toBe("Next run");
+  });
+
+  it("shows Personal as project membership and keeps it searchable", async () => {
+    render(
+      <AutomationOverviewView
+        entries={[
+          {
+            ...INSTALLED_AUTOMATIONS[0]!,
+            project: { id: "proj_personal", name: "Personal" },
+          },
+        ]}
+        error={null}
+        onRetry={() => {}}
+        onOpenDetail={() => {}}
+        onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
+        onCreateViaChat={() => {}}
+        activeMode="installed"
+        onModeChange={() => {}}
+      />,
+    );
+    const icon = screen.getByRole("img", { name: "Project: Personal" });
+    expect(icon.querySelector('[data-icon="Folder"]')).not.toBeNull();
+    expect(screen.queryByText("Local")).toBeNull();
+    expect(screen.getByText("Personal")).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText("Search automations"), {
+      target: { value: "Personal" },
+    });
+    expect(screen.getByText("Nightly digest")).toBeTruthy();
+    focusWithKeyboard(icon);
+    expect((await screen.findByRole("tooltip")).textContent).toBe(
+      "Project: Personal",
+    );
   });
 
   it("does not treat a project named Local as the personal project", () => {
@@ -537,6 +691,8 @@ describe("AutomationOverviewView", () => {
         onRetry={() => {}}
         onOpenDetail={() => {}}
         onEnabledChange={async () => {}}
+        onRunNow={async () => {}}
+        onDelete={() => {}}
         onCreateViaChat={() => {}}
         activeMode="installed"
         onModeChange={() => {}}

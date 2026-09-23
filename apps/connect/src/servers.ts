@@ -4,6 +4,7 @@ import {
   SERVER_OFFLINE_AFTER_MS,
   schema,
   server,
+  sha256Hex,
   type ConnectDb,
 } from "@bb/connect-db";
 import {
@@ -12,6 +13,7 @@ import {
   verifySessionCookie,
 } from "./session.js";
 import { resolveConnectRuntime } from "./cloud-dev.js";
+import { jsonResponse, methodNotAllowed } from "./json-response.js";
 import { MACHINE_CREDENTIAL_HEADER } from "./protocol-headers.js";
 import type { Env } from "./tunnel-do.js";
 
@@ -111,16 +113,6 @@ const serverCredentialCache = new Map<
   { value: string | null; expires: number }
 >();
 const SERVER_CRED_TTL_MS = 20_000;
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(value),
-  );
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 export async function verifyServerCredential(
   credential: string,
@@ -224,20 +216,7 @@ export async function listAccountServers(
   });
 }
 
-export async function handleListAccountServers(
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  if (request.method !== "GET") {
-    return new Response(JSON.stringify({ error: "method_not_allowed" }), {
-      status: 405,
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-        allow: "GET",
-      },
-    });
-  }
-
+async function resolveRequestAccount(request: Request, env: Env) {
   const db = drizzle(env.DB, { schema });
   const runtime = resolveConnectRuntime(env);
   const userId = await resolveAccountUserId(
@@ -246,18 +225,24 @@ export async function handleListAccountServers(
     db,
     runtime.sessionCookieName,
   );
+  return { db, runtime, userId };
+}
+
+export async function handleListAccountServers(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (request.method !== "GET") {
+    return methodNotAllowed("GET");
+  }
+
+  const { db, userId } = await resolveRequestAccount(request, env);
   if (!userId) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      status: 401,
-      headers: { "content-type": "application/json; charset=utf-8" },
-    });
+    return jsonResponse({ error: "unauthorized" }, 401);
   }
 
   const servers = await listAccountServers(db, userId);
-  return new Response(JSON.stringify({ servers }), {
-    status: 200,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
+  return jsonResponse({ servers }, 200);
 }
 
 export async function handleDisconnectServer(
@@ -265,23 +250,14 @@ export async function handleDisconnectServer(
   env: Env,
 ): Promise<Response> {
   if (request.method !== "POST") {
-    return new Response(JSON.stringify({ error: "method_not_allowed" }), {
-      status: 405,
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-        allow: "POST",
-      },
-    });
+    return methodNotAllowed("POST");
   }
 
   const db = drizzle(env.DB, { schema });
   const credential = request.headers.get(MACHINE_CREDENTIAL_HEADER) ?? "";
   const revoked = await revokeServerCredential(credential, db);
   if (!revoked) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      status: 401,
-      headers: { "content-type": "application/json; charset=utf-8" },
-    });
+    return jsonResponse({ error: "unauthorized" }, 401);
   }
 
   try {
@@ -296,27 +272,11 @@ export async function handleCreateDesktopSession(
   env: Env,
 ): Promise<Response> {
   if (request.method !== "POST") {
-    return new Response(JSON.stringify({ error: "method_not_allowed" }), {
-      status: 405,
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-        allow: "POST",
-      },
-    });
+    return methodNotAllowed("POST");
   }
-  const db = drizzle(env.DB, { schema });
-  const runtime = resolveConnectRuntime(env);
-  const userId = await resolveAccountUserId(
-    request,
-    env.BETTER_AUTH_SECRET,
-    db,
-    runtime.sessionCookieName,
-  );
+  const { runtime, userId } = await resolveRequestAccount(request, env);
   if (!userId) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      status: 401,
-      headers: { "content-type": "application/json; charset=utf-8" },
-    });
+    return jsonResponse({ error: "unauthorized" }, 401);
   }
   const expiresAt = Date.now() + DESKTOP_SESSION_TTL_MS;
   const value = await createDesktopSessionCookie(
@@ -324,18 +284,15 @@ export async function handleCreateDesktopSession(
     env.BETTER_AUTH_SECRET,
     expiresAt,
   );
-  return new Response(
-    JSON.stringify({
+  return jsonResponse(
+    {
       cookie: {
         domain: `.${env.BASE_DOMAIN}`,
         expiresAt,
         name: runtime.desktopSessionCookieName,
         value,
       },
-    }),
-    {
-      status: 200,
-      headers: { "content-type": "application/json; charset=utf-8" },
     },
+    200,
   );
 }

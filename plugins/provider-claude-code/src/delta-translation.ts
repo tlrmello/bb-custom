@@ -57,7 +57,6 @@ import {
 import {
   hasCompletionBlockingClaudeTasks,
   buildInterruptedClaudeTaskDeltas,
-  hasPendingClaudeTasks,
   translateClaudeTaskMessage,
   type ClaudeTaskMap,
 } from "./task-translation.js";
@@ -414,12 +413,14 @@ function createThreadState(): ClaudeThreadDialectState {
 
 export interface ClaudeDeltaTranslatorOptions {
   cwd?: string | undefined;
+  sandboxEnabled: boolean;
 }
 
 export function createClaudeDeltaTranslator(
-  options: ClaudeDeltaTranslatorOptions = {},
+  options: ClaudeDeltaTranslatorOptions,
 ) {
   const sessionCwd = options.cwd;
+  const sandboxEnabled = options.sandboxEnabled;
   const statesByThreadId = new Map<string, ClaudeThreadDialectState>();
   let injectedToolsByName = new Map<string, ClaudeInjectedTool>();
 
@@ -828,9 +829,18 @@ export function createClaudeDeltaTranslator(
     if (providerCheckpointId !== undefined) {
       state.latestProviderCheckpointId = providerCheckpointId;
     }
-    const requestContextTokens = extractClaudeRequestContextTokens(message);
-    if (requestContextTokens !== null) {
-      state.latestRequestContextTokens = requestContextTokens;
+    if (parentToolCallId === undefined) {
+      const requestContextTokens = extractClaudeRequestContextTokens(message);
+      if (requestContextTokens !== null) {
+        state.latestRequestContextTokens = requestContextTokens;
+        deltas.push({
+          kind: "contextWindow",
+          used: requestContextTokens,
+          size: state.selectedModelContextWindow,
+          estimated: true,
+          attach: "open",
+        });
+      }
     }
 
     for (const thinkingBlock of extractThinkingBlocks(message)) {
@@ -861,6 +871,7 @@ export function createClaudeDeltaTranslator(
         toolUseId: toolUse.id,
         input: toolUse.input,
         injectedTools: injectedToolsByName,
+        sandboxEnabled,
       });
       state.startedTools.set(toolUse.id, classified);
       deltas.push({
@@ -1277,14 +1288,6 @@ export function createClaudeDeltaTranslator(
     return statesByThreadId.get(threadId)?.mirror.turnOpen === true;
   }
 
-  function hasOpenSessionWork(threadId: string): boolean {
-    const state = statesByThreadId.get(threadId);
-    return (
-      state?.mirror.turnOpen === true ||
-      (state !== undefined && hasPendingClaudeTasks(state.tasksById))
-    );
-  }
-
   function setClaudeModelContextWindowHint(
     threadId: string,
     model: string,
@@ -1297,7 +1300,6 @@ export function createClaudeDeltaTranslator(
     acceptInput,
     buildSessionSettlementDeltas,
     configureInjectedTools,
-    hasOpenSessionWork,
     hasOpenTurn,
     setClaudeModelContextWindowHint,
     translate,

@@ -7,7 +7,6 @@ export interface BundledPluginDefinition {
   pluginId: string;
   autoInstall: boolean;
   defaultEnabled: boolean;
-  category?: string;
 }
 
 export interface BundledPluginRegistration extends BundledPluginDefinition {
@@ -21,137 +20,172 @@ interface ResolveBuiltinPluginRootPathArgs {
 
 export const BUILTIN_PLUGINS_DIRECTORY_NAME = "builtin-plugins";
 
+const ACCOUNT_POOL_PARENT_URL_ENV = "BB_ACCOUNT_POOL_PARENT_URL";
+
+export function accountPoolDefaultEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const value = env[ACCOUNT_POOL_PARENT_URL_ENV];
+  return typeof value === "string" && value.length > 0;
+}
+
 const REPO_PLUGINS_DIRECTORY_NAME = "plugins";
 
-export const PLUGIN_CATALOG_CATEGORIES = [
-  "Workflow management",
-  "Agent interaction",
-  "Context & knowledge",
-  "Developer tools",
-  "Host access",
-  "Interface",
-] as const;
-
 export const BUILTIN_PLUGINS = [
+  {
+    name: "bb-guide",
+    pluginId: "bb-guide",
+    defaultEnabled: true,
+  },
+  {
+    name: "account-pool",
+    pluginId: "account-pool",
+    defaultEnabled: accountPoolDefaultEnabled(),
+  },
   {
     name: "ask-user-question",
     pluginId: "ask-user-question",
     defaultEnabled: false,
-    category: "Agent interaction",
   },
   {
     name: "automations",
     pluginId: "automations",
     defaultEnabled: true,
-    category: "Workflow management",
   },
   {
     name: "connect",
     pluginId: "connect",
     defaultEnabled: true,
-    category: "Host access",
+  },
+  {
+    name: "environment-project-checkout",
+    pluginId: "environment-project-checkout",
+    defaultEnabled: true,
+  },
+  {
+    name: "environment-git-worktree",
+    pluginId: "environment-git-worktree",
+    defaultEnabled: true,
+  },
+  {
+    name: "environment-personal-workspace",
+    pluginId: "environment-personal-workspace",
+    defaultEnabled: true,
   },
   {
     name: "custom-instructions",
     pluginId: "custom-instructions",
     defaultEnabled: true,
-    category: "Context & knowledge",
   },
   {
     name: "plugin-api-tester",
     pluginId: "plugin-api-tester",
     defaultEnabled: false,
-    category: "Developer tools",
   },
   {
     name: "inline-vis",
     pluginId: "inline-vis",
     defaultEnabled: true,
-    category: "Interface",
   },
   {
     name: "monaco-editor",
     pluginId: "monaco-editor",
     defaultEnabled: false,
-    category: "Interface",
   },
   {
     name: "pdf-preview",
     pluginId: "pdf-preview",
     defaultEnabled: true,
-    category: "Interface",
   },
   {
     name: "provider-codex",
     pluginId: "provider-codex",
     defaultEnabled: true,
-    category: "Agent interaction",
   },
   {
     name: "provider-claude-code",
     pluginId: "provider-claude-code",
     defaultEnabled: true,
-    category: "Agent interaction",
   },
   {
     name: "provider-pi",
     pluginId: "provider-pi",
     defaultEnabled: true,
-    category: "Agent interaction",
+  },
+  {
+    name: "provider-usage",
+    pluginId: "provider-usage",
+    defaultEnabled: true,
   },
   {
     name: "provider-acp",
     pluginId: "provider-acp",
     defaultEnabled: true,
-    category: "Agent interaction",
   },
   {
     name: "keep-awake",
     pluginId: "keep-awake",
     defaultEnabled: true,
-    category: "Host access",
   },
   {
     name: "plugin-api-docs",
     pluginId: "plugin-api-docs",
     defaultEnabled: false,
-    category: "Developer tools",
   },
   {
     name: "provider-retry",
     pluginId: "provider-retry",
     defaultEnabled: true,
-    category: "Agent interaction",
+  },
+  {
+    name: "push-notifications",
+    pluginId: "push-notifications",
+    defaultEnabled: true,
   },
   {
     name: "secrets",
     pluginId: "secrets",
     defaultEnabled: true,
-    category: "Developer tools",
+  },
+  {
+    name: "drafts",
+    pluginId: "drafts",
+    defaultEnabled: true,
+  },
+  {
+    name: "thread-list",
+    pluginId: "thread-list",
+    defaultEnabled: true,
+  },
+  {
+    name: "navigation",
+    pluginId: "navigation",
+    defaultEnabled: true,
   },
   {
     name: "scheduled-send",
     pluginId: "scheduled-send",
     defaultEnabled: true,
-    category: "Workflow management",
+  },
+  {
+    name: "agent-annotations",
+    pluginId: "agent-annotations",
+    defaultEnabled: false,
   },
   {
     name: "concurrency-limit",
     pluginId: "concurrency-limit",
     defaultEnabled: true,
-    category: "Workflow management",
   },
   {
     name: "side-chat",
     pluginId: "side-chat",
     defaultEnabled: true,
-    category: "Agent interaction",
   },
   {
     name: "workflows",
     pluginId: "workflows",
     defaultEnabled: false,
-    category: "Workflow management",
   },
 ].map((plugin): BundledPluginDefinition => ({
   ...plugin,
@@ -160,34 +194,39 @@ export const BUILTIN_PLUGINS = [
 
 export const OFFICIAL_PLUGINS = [
   {
+    name: "environment-modal-sandbox",
+    pluginId: "environment-modal-sandbox",
+    defaultEnabled: true,
+  },
+  {
+    name: "browser-automation",
+    pluginId: "browser-automation",
+    defaultEnabled: false,
+  },
+  {
     name: "github",
     pluginId: "github",
     defaultEnabled: true,
-    category: "Developer tools",
   },
   {
     name: "docs",
     pluginId: "simple-notes",
     defaultEnabled: true,
-    category: "Context & knowledge",
   },
   {
     name: "memory",
     pluginId: "memory",
     defaultEnabled: true,
-    category: "Context & knowledge",
   },
   {
     name: "tasks",
     pluginId: "tasks",
     defaultEnabled: true,
-    category: "Workflow management",
   },
   {
     name: "theme-preview",
     pluginId: "theme-preview",
     defaultEnabled: true,
-    category: "Interface",
   },
 ].map((plugin): BundledPluginDefinition => ({
   ...plugin,
@@ -199,10 +238,6 @@ export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [
   ...OFFICIAL_PLUGINS,
 ];
 
-export const BUILTIN_PLUGIN_NAMES = BUILTIN_PLUGINS.map(
-  (plugin) => plugin.name,
-);
-
 const builtinPluginsModuleDir = path.dirname(fileURLToPath(import.meta.url));
 
 export function builtinPluginSource(name: string): string {
@@ -212,6 +247,13 @@ export function builtinPluginSource(name: string): string {
 export function resolveBuiltinPluginRootPathForModuleDir(
   args: ResolveBuiltinPluginRootPathArgs,
 ): string {
+  const preparedCandidate = path.resolve(
+    args.moduleDir,
+    "../../../packages/bundled-plugins/dist",
+    args.name,
+  );
+  if (existsSync(preparedCandidate)) return preparedCandidate;
+
   const packagedCandidate = path.resolve(
     args.moduleDir,
     BUILTIN_PLUGINS_DIRECTORY_NAME,

@@ -40,6 +40,7 @@ export interface SdkSessionOptions {
   plugins?: Options["plugins"];
   thinking?: Options["thinking"];
   settings?: Options["settings"];
+  extraArgs?: Options["extraArgs"];
   recordThreadId?: () => string;
 }
 
@@ -188,6 +189,10 @@ export class SdkSession {
     await this.query?.setPermissionMode(mode);
   }
 
+  async getContextUsage(): Promise<unknown> {
+    return this.query ? this.query.getContextUsage() : null;
+  }
+
   async setModel(model: string | undefined): Promise<void> {
     await this.query?.setModel(model);
     this.options.model = model;
@@ -277,6 +282,7 @@ export class SdkSession {
       ...(this.options.plugins ? { plugins: this.options.plugins } : {}),
       ...(this.options.thinking ? { thinking: this.options.thinking } : {}),
       ...(this.options.settings ? { settings: this.options.settings } : {}),
+      ...(this.options.extraArgs ? { extraArgs: this.options.extraArgs } : {}),
     };
 
     try {

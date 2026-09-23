@@ -26,8 +26,11 @@ export function loadFixture(name: string): Record<string, unknown> {
   return parsed;
 }
 
-export function loadSessionFixture(name: string): Record<string, unknown>[] {
-  return readFileSync(resolve(FIXTURES, "sessions", name), "utf8")
+export function loadSessionFixture(
+  name: string,
+  directory: "sessions" | "transcripts" = "sessions",
+): Record<string, unknown>[] {
+  return readFileSync(resolve(FIXTURES, directory, name), "utf8")
     .trim()
     .split("\n")
     .map((line) => {
@@ -117,8 +120,13 @@ interface ClaudeDeltaHarness {
   itemId(providerItemId: string, threadId?: string): string;
 }
 
-export function createClaudeDeltaHarness(): ClaudeDeltaHarness {
-  const translator = createClaudeDeltaTranslator({ cwd: "/workspace" });
+export function createClaudeDeltaHarness(
+  options: { sandboxEnabled?: boolean } = {},
+): ClaudeDeltaHarness {
+  const translator = createClaudeDeltaTranslator({
+    cwd: "/workspace",
+    sandboxEnabled: options.sandboxEnabled ?? false,
+  });
   const assembler = createDeltaAssembler({
     providerId: "claude-code",
     entropyPrefix: CLAUDE_TEST_ENTROPY,

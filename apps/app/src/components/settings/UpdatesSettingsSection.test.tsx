@@ -13,6 +13,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Host } from "@bb/domain";
+import { makeHost as makeHostFixture } from "@bb/test-helpers/domain-fixtures";
 import type { BbDesktopApi, BbDesktopInfo } from "@bb/desktop-contract";
 import {
   HOST_DAEMON_PROTOCOL_VERSION,
@@ -50,10 +51,16 @@ vi.mock("@/components/ui/app-toast", () => ({
 }));
 
 vi.mock("@/lib/sdk", async () => {
-  const { makeProviderInfo } = await import("@/test/provider-info-fixture");
+  const { makeProviderInfo } = await import("@bb/test-helpers/domain-fixtures");
+  const { makeSystemConfig } = await import("@/test/fixtures/system-config");
   return {
     sdk: {
-      system: { version: vi.fn() },
+      system: {
+        version: vi.fn(),
+        config: vi.fn(async () =>
+          makeSystemConfig({ primaryHostId: "host_primary" }),
+        ),
+      },
       providers: {
         list: vi.fn(async () => [
           makeProviderInfo({ id: "codex", displayName: "Codex" }),
@@ -122,16 +129,12 @@ vi.mock("@/components/provider-cli/provider-cli-install", async (original) => {
 });
 
 function makeHost(overrides: Partial<Host> & Pick<Host, "id" | "name">): Host {
-  return {
-    type: "persistent",
-    status: "connected",
+  return makeHostFixture({
     lastSeenAt: Date.now(),
-    maxPermissionMode: "full",
-    lastRejectedProtocolVersion: null,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     ...overrides,
-  };
+  });
 }
 
 function makeUpdateIssue(args: {
@@ -337,7 +340,7 @@ describe("UpdatesSettingsSection", () => {
     expect(sdk.system.version).toHaveBeenCalledTimes(1);
   });
 
-  it("aligns Update all with the first machine heading", () => {
+  it("places fleet-wide Update all above every machine section", () => {
     useDesktopUpdateInfoMock.mockReturnValue({
       desktopApi: null,
       desktopInfo: null,
@@ -381,10 +384,23 @@ describe("UpdatesSettingsSection", () => {
       "[data-updates-machine]",
     );
     const homelabSection = homelabHeading.closest("[data-updates-machine]");
-    expect(workstationSection?.contains(bulkActions)).toBe(true);
+    const fleetHeading = screen.getByRole("heading", {
+      name: "Machine updates",
+    });
+    const fleetSection = fleetHeading.closest("section");
+    const fleetHeader = fleetSection?.firstElementChild;
+    const fleetBody = fleetSection?.children.item(1);
+    expect(fleetHeader?.contains(bulkActions)).toBe(true);
+    expect(fleetBody?.contains(workstationSection)).toBe(true);
+    expect(fleetBody?.contains(homelabSection)).toBe(true);
+    expect(workstationSection?.contains(bulkActions)).toBe(false);
     expect(homelabSection?.contains(bulkActions)).toBe(false);
     expect(bulkActions.querySelector('[data-icon="Download"]')).not.toBeNull();
-    expect(bulkActions.parentElement?.className).toContain("pr-4");
+    expect(
+      screen.getByText(
+        "Manage bb and provider CLI updates across all machines.",
+      ),
+    ).toBeDefined();
   });
 
   it("keeps the changelog preview behind its experiment", () => {
@@ -456,7 +472,7 @@ The canonical release summary.
     });
     expect(screen.queryByText("2 up to date")).toBeNull();
     expect(screen.getByRole("heading", { name: /workstation/ })).toBeDefined();
-    expect(screen.queryByText("Primary")).toBeNull();
+    expect(screen.queryByText("Server")).toBeNull();
     expect(screen.queryByText("This machine")).toBeNull();
     expect(screen.getByRole("heading", { name: /studio-mac/ })).toBeDefined();
     expect(screen.getAllByText("Codex")).toHaveLength(2);
@@ -491,7 +507,7 @@ The canonical release summary.
     expect(changelog?.textContent).toContain("The canonical release summary.");
     expect(
       changelog?.querySelector('[data-changelog-version="9.9.9"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     const changelogLabel = changelog?.querySelector("[data-changelog-label]");
     expect(changelogLabel?.className).toContain("rounded-sm");
     expect(changelogLabel?.className).not.toContain("rounded-full");
@@ -532,6 +548,12 @@ The canonical release summary.
     const dismissChangelog = screen.getByRole("button", {
       name: "Dismiss bb 9.9.9 changelog preview",
     });
+    const changelogHeader = changelog?.querySelector("[data-changelog-header]");
+    const changelogCard = changelogHeader?.closest("section");
+    expect(changelogPreview?.firstElementChild).toBe(changelogHeader);
+    expect(changelogHeader?.className).not.toContain("border-b");
+    expect(changelogHeader?.contains(dismissChangelog)).toBe(true);
+    expect(changelogCard?.contains(changelogPreview ?? null)).toBe(true);
     expect(dismissChangelog.querySelector('[data-icon="X"]')).not.toBeNull();
     fireEvent.click(
       screen.getByRole("button", {
@@ -629,6 +651,29 @@ The canonical release summary.
         )
         ?.getAttribute("class"),
     ).not.toContain("opacity-");
+  });
+
+  it("does not claim up to date when the latest version is unknown", async () => {
+    useDesktopUpdateInfoMock.mockReturnValue({
+      desktopApi: null,
+      desktopInfo: null,
+      isDesktop: false,
+    });
+    const machine = makeMachine({
+      host: makeHost({ id: "host_1", name: "workstation" }),
+      isPrimary: true,
+    });
+    const codex = machine.providerStatus!.codex;
+    machine.providerStatus!.codex = { ...codex, latestVersion: null };
+    useUpdateInventoryMock.mockReturnValue(
+      makeInventory({ lastCheckedAt: Date.now(), machines: [machine] }),
+    );
+
+    renderSection({});
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Latest unknown").length).toBeGreaterThan(0);
+    });
   });
 
   it("does not call an offline fleet all in sync", async () => {
@@ -954,7 +999,7 @@ The canonical release summary.
     expect(
       providerIcon
         ?.querySelector("[data-provider-logo]")
-        ?.getAttribute("class"),
+        ?.parentElement?.getAttribute("class"),
     ).toContain("text-muted-foreground");
     expect(providerIcon?.classList.contains("flex")).toBe(true);
     expect(providerIcon?.classList.contains("size-3.5")).toBe(true);
@@ -979,7 +1024,7 @@ The canonical release summary.
     expect(screen.queryByText("1 up to date")).toBeNull();
   });
 
-  it("badges the client-local daemon independently from the primary update owner", () => {
+  it("badges the client-local daemon independently from the server machine", async () => {
     useDesktopUpdateInfoMock.mockReturnValue({
       desktopApi: null,
       desktopInfo: null,
@@ -1010,10 +1055,43 @@ The canonical release summary.
       name: /workstation/u,
     });
     const localHeading = screen.getByRole("heading", { name: /studio-mac/u });
-    expect(primaryHeading.textContent).not.toContain("Primary");
+    await waitFor(() => {
+      expect(primaryHeading.textContent).toContain("Server");
+    });
     expect(primaryHeading.textContent).not.toContain("This machine");
     expect(localHeading.textContent).toContain("This machine");
-    expect(localHeading.textContent).not.toContain("Primary");
+    expect(localHeading.textContent).not.toContain("Server");
+  });
+
+  it("badges a lone server machine without marking it as this machine", async () => {
+    useDesktopUpdateInfoMock.mockReturnValue({
+      desktopApi: null,
+      desktopInfo: null,
+      isDesktop: false,
+    });
+    const primary = makeHost({ id: "host_primary", name: "workstation" });
+    hostDaemon.localDaemonHostId = primary.id;
+    useUpdateInventoryMock.mockReturnValue(
+      makeInventory({
+        machines: [
+          makeMachine({
+            host: primary,
+            issues: [makeUpdateIssue({ provider: "codex" })],
+            isPrimary: true,
+          }),
+        ],
+      }),
+    );
+
+    renderSection();
+
+    const primaryHeading = screen.getByRole("heading", {
+      name: /workstation/u,
+    });
+    await waitFor(() => {
+      expect(primaryHeading.textContent).toContain("Server");
+    });
+    expect(primaryHeading.textContent).not.toContain("This machine");
   });
 
   it("lists Cursor updates with the other provider CLIs", async () => {
@@ -1254,7 +1332,7 @@ The canonical release summary.
             .querySelector(
               `[data-provider-icon="${providerId}"] [data-provider-logo]`,
             )
-            ?.getAttribute("class"),
+            ?.parentElement?.getAttribute("class"),
         ).toContain("text-muted-foreground"),
       );
     }

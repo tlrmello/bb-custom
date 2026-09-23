@@ -1,14 +1,18 @@
+import { prependOlderTimelineRows } from "@bb/client-core";
 import {
   useInfiniteQuery,
   useQuery,
   useQueryClient,
+  type NotifyOnChangeProps,
   type QueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
-import { useDebounceValue } from "usehooks-ts";
 import { COMPACT_VIEWPORT_QUERY } from "@bb/shared-ui/hooks/use-compact-viewport";
 import { getMediaQuerySnapshot } from "@bb/shared-ui/hooks/use-media-query";
-import type { PendingInteraction, ThreadListEntry } from "@bb/domain";
+import type {
+  PendingInteraction,
+  ThreadListEntry,
+} from "@bb/domain";
 import type {
   PromptHistoryResponse,
   ThreadQueuedMessageListResponse,
@@ -24,6 +28,7 @@ import type {
   ThreadTimelineResponse,
   TimelineTurnSummaryDetailsResponse,
 } from "@bb/server-contract";
+import { useDebouncedValue } from "../useDebouncedValue";
 import { applyTimelineDelta } from "@bb/server-contract";
 import type { ThreadListFilters } from "@bb/client-core";
 import type { FilePreview } from "@bb/client-core";
@@ -92,7 +97,7 @@ interface QueryOptions {
   staleTime?: number;
 }
 
-const THREAD_LIST_STALE_TIME_MS = 10_000;
+export const THREAD_LIST_STALE_TIME_MS = 10_000;
 const THREAD_SEARCH_STALE_TIME_MS = 10_000;
 const THREAD_DETAIL_STALE_TIME_MS = 5_000;
 const THREAD_MENTION_CANDIDATE_LIMIT = 200;
@@ -117,7 +122,11 @@ export function didThreadDetailBootstrapRefreshAfterMount(query: {
   );
 }
 
-type ThreadTimelineQueryOptions = QueryOptions;
+interface ThreadTimelineQueryOptions extends QueryOptions {
+  notifyOnChangeProps?: NotifyOnChangeProps;
+}
+
+type ThreadConversationOutlineQueryOptions = QueryOptions;
 
 type ThreadTimelineTurnSummaryDetailsQueryOptions = QueryOptions;
 
@@ -577,10 +586,7 @@ export function useThreadSearch({
   limitPerGroup = THREAD_SEARCH_LIMIT_PER_GROUP,
   query,
 }: UseThreadSearchArgs): UseThreadSearchResult {
-  const [debouncedRawQuery] = useDebounceValue(
-    query,
-    THREAD_SEARCH_DEBOUNCE_MS,
-  );
+  const debouncedRawQuery = useDebouncedValue(query, THREAD_SEARCH_DEBOUNCE_MS);
   const trimmedQuery = query.trim();
   const debouncedQuery = debouncedRawQuery.trim();
   const liveQueryIsSearchable = hasThreadSearchableQuery(trimmedQuery);
@@ -589,7 +595,10 @@ export function useThreadSearch({
     active && liveQueryIsSearchable && trimmedQuery !== debouncedQuery;
   const enabled = active && liveQueryIsSearchable && hasSearchableQuery;
   const threadSearchQuery = useQuery<ThreadSearchResponse>({
-    queryKey: threadSearchQueryKey({ limitPerGroup, query: debouncedQuery }),
+    queryKey: threadSearchQueryKey({
+      limitPerGroup,
+      query: debouncedQuery,
+    }),
     queryFn: ({ signal }) =>
       sdk.threads.search({
         limitPerGroup: String(limitPerGroup),
@@ -950,6 +959,9 @@ export function useThreadTimeline(
       });
     },
     enabled,
+    ...(options?.notifyOnChangeProps === undefined
+      ? {}
+      : { notifyOnChangeProps: options.notifyOnChangeProps }),
     refetchOnMount: options?.refetchOnMount ?? true,
     ...(options?.staleTime === undefined
       ? {}
@@ -967,7 +979,7 @@ export function useThreadTimeline(
 
 export function useThreadConversationOutline(
   id: string,
-  options?: ThreadTimelineQueryOptions,
+  options?: ThreadConversationOutlineQueryOptions,
 ) {
   const enabled = (options?.enabled ?? true) && Boolean(id);
   useThreadDetailRealtimeSubscription(id, { enabled });
@@ -992,8 +1004,8 @@ export function useThreadTimelineTurnSummaryDetails(
 ) {
   return useQuery<TimelineTurnSummaryDetailsResponse>({
     queryKey: threadTimelineTurnSummaryDetailsQueryKey(identity),
-    queryFn: ({ signal }) =>
-      sdk.threads.timelineTurnSummaryDetails({
+    queryFn: async ({ signal }) => {
+      const input = {
         threadId: requireThreadId(
           identity.threadId,
           "useThreadTimelineTurnSummaryDetails",
@@ -1002,7 +1014,23 @@ export function useThreadTimelineTurnSummaryDetails(
         sourceSeqStart: String(identity.sourceSeqStart),
         turnId: identity.turnId,
         signal,
-      }),
+      };
+      const response = await sdk.threads.timelineTurnSummaryDetails(input);
+      let rows = response.rows;
+      let cursor = response.olderCursor;
+      while (cursor) {
+        const older = await sdk.threads.timelineTurnSummaryDetails({
+          ...input,
+          beforeCursor: cursor,
+        });
+        rows = prependOlderTimelineRows({
+          olderRows: older.rows,
+          loadedRows: rows,
+        });
+        cursor = older.olderCursor;
+      }
+      return { ...response, rows, olderCursor: null };
+    },
     enabled:
       (options?.enabled ?? true) &&
       Boolean(identity.threadId) &&
@@ -1030,4 +1058,11 @@ export function getLatestPendingInteraction(
       interaction.createdAt > latest.createdAt ? interaction : latest,
     firstInteraction,
   );
+}
+
+export function isPendingInteractionStateUnknown(
+  interactions: readonly PendingInteraction[] | undefined,
+  isFetching: boolean,
+): boolean {
+  return getLatestPendingInteraction(interactions) === null && isFetching;
 }

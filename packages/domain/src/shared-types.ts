@@ -84,7 +84,7 @@ const promptMentionPathEntryKindSchema = z.enum(
   promptMentionPathEntryKindValues,
 );
 
-export const promptMentionCommandTriggerValues = ["/"] as const;
+export const promptMentionCommandTriggerValues = ["/", "$"] as const;
 export const promptMentionCommandTriggerSchema = z.enum(
   promptMentionCommandTriggerValues,
 );
@@ -206,6 +206,16 @@ export const promptInputSchema = z.discriminatedUnion("type", [
 ]);
 export type PromptInput = z.infer<typeof promptInputSchema>;
 
+export function flattenPromptInputGroups(
+  inputGroups: readonly PromptInput[][],
+): PromptInput[] {
+  return inputGroups.flatMap((group, index) =>
+    index === 0
+      ? group
+      : [{ type: "text" as const, text: "\n\n", mentions: [] }, ...group],
+  );
+}
+
 interface PromptCommandSelector {
   trigger: PromptMentionCommandTrigger;
   name: string;
@@ -229,16 +239,16 @@ function isSelectedPromptCommandMention(
   );
 }
 
-const BUILTIN_COMPACT_COMMAND = { trigger: "/", name: "compact" } as const;
-
-export function isStandaloneBuiltinCompactCommand(
+function isStandaloneBuiltinCommand(
   input: readonly PromptInput[],
+  name: string,
 ): boolean {
+  const selector = { trigger: "/" as const, name };
   const selected = input.flatMap((item) =>
     item.type === "text"
       ? item.mentions
           .filter((mention) =>
-            isSelectedPromptCommandMention(mention, BUILTIN_COMPACT_COMMAND),
+            isSelectedPromptCommandMention(mention, selector),
           )
           .map((mention) => ({ mention, text: item.text }))
       : [],
@@ -256,14 +266,25 @@ export function isStandaloneBuiltinCompactCommand(
     mention.resource.kind !== "command" ||
     mention.resource.source !== "command" ||
     mention.resource.origin !== "builtin" ||
-    text.slice(mention.start, mention.end) !== "/compact"
+    text.slice(mention.start, mention.end) !== `/${name}`
   ) {
     return false;
   }
-  return removeCommandMentionsFromPromptInput(
-    input,
-    BUILTIN_COMPACT_COMMAND,
-  ).every((item) => item.type === "text" && item.text.trim() === "");
+  return removeCommandMentionsFromPromptInput(input, selector).every(
+    (item) => item.type === "text" && item.text.trim() === "",
+  );
+}
+
+export function isStandaloneBuiltinCompactCommand(
+  input: readonly PromptInput[],
+): boolean {
+  return isStandaloneBuiltinCommand(input, "compact");
+}
+
+export function isStandaloneBuiltinClearCommand(
+  input: readonly PromptInput[],
+): boolean {
+  return isStandaloneBuiltinCommand(input, "clear");
 }
 
 export function createStandaloneBuiltinCompactCommandInput(): PromptInput[] {

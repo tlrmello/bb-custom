@@ -3,6 +3,7 @@ import { cn } from "@bb/shared-ui/lib/utils";
 
 interface SettingsSectionProps {
   action?: ReactNode;
+  actionPlacement?: "inline" | "responsive";
   children: ReactNode;
   description?: string;
   title: ReactNode;
@@ -11,6 +12,7 @@ interface SettingsSectionProps {
 
 export function SettingsSection({
   action,
+  actionPlacement = "responsive",
   children,
   description,
   title,
@@ -20,8 +22,16 @@ export function SettingsSection({
     <section className="space-y-3">
       <div
         className={cn(
-          "flex flex-col gap-3 sm:flex-row sm:justify-between sm:gap-4",
-          description ? "sm:items-start" : "sm:items-center",
+          actionPlacement === "inline"
+            ? "flex flex-row justify-between gap-4"
+            : "flex flex-col gap-3 sm:flex-row sm:justify-between sm:gap-4",
+          description
+            ? actionPlacement === "inline"
+              ? "items-start"
+              : "sm:items-start"
+            : actionPlacement === "inline"
+              ? "items-center"
+              : "sm:items-center",
         )}
       >
         <div className="min-w-0">
@@ -81,7 +91,24 @@ export const SettingsRow = forwardRef<HTMLDivElement, SettingsRowProps>(
 );
 SettingsRow.displayName = "SettingsRow";
 
-export type SettingsControlPlacement = "inline" | "below";
+export function SettingsDetailRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <SettingsRow className="flex-col items-stretch gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+      <span className="shrink-0 text-foreground">{label}</span>
+      <div className="flex min-w-0 flex-wrap items-center justify-start gap-2 text-left text-subtle-foreground sm:ml-auto sm:justify-end sm:text-right">
+        {children}
+      </div>
+    </SettingsRow>
+  );
+}
+
+export type SettingsControlPlacement = "inline" | "below" | "trailing";
 
 interface SettingsWithControlProps {
   label: string;
@@ -107,11 +134,15 @@ export function SettingsWithControl({
   children,
 }: SettingsWithControlProps) {
   const inline = controlPlacement === "inline";
+  const trailing = controlPlacement === "trailing";
   return (
     <div
       data-control-placement={controlPlacement}
       className={cn(
-        "flex flex-col gap-2.5",
+        trailing
+          ? "flex flex-row justify-between gap-5"
+          : "flex flex-col gap-2.5",
+        trailing && (description ? "items-start" : "items-center"),
         inline && "sm:flex-row sm:justify-between sm:gap-5",
         inline && (description ? "sm:items-start" : "sm:items-center"),
       )}
@@ -129,7 +160,11 @@ export function SettingsWithControl({
       </div>
       <div
         className={
-          inline ? "shrink-0 sm:flex sm:justify-end" : "w-full min-w-0"
+          trailing
+            ? "flex shrink-0 justify-end"
+            : inline
+              ? "shrink-0 sm:flex sm:justify-end"
+              : "w-full min-w-0"
         }
       >
         {children}

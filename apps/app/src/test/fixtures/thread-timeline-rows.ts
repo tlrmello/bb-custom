@@ -78,6 +78,7 @@ interface CommandRowArgs extends RowBaseOverrideArgs {
   exitCode?: number | null;
   id?: string;
   output?: string;
+  presentation?: TimelineRowPresentation;
   seq?: number;
   source?: string | null;
   sourceSeqEnd?: number;
@@ -330,10 +331,6 @@ interface TurnRowArgs extends RowBaseOverrideArgs {
   turnId?: string;
 }
 
-interface ReadIntentArgs {
-  path: string;
-}
-
 interface RowSequenceArgs {
   seq: number | undefined;
   sourceSeqStart: number | undefined;
@@ -510,15 +507,6 @@ export function conversationRow({
   };
 }
 
-export function readIntent({ path }: ReadIntentArgs): TimelineActivityIntent {
-  return {
-    type: "read",
-    command: `cat ${path}`,
-    name: path.split("/").pop() ?? path,
-    path,
-  };
-}
-
 export function commandRow({
   activityIntents = [],
   approvalStatus = null,
@@ -530,6 +518,7 @@ export function commandRow({
   exitCode,
   id = DEFAULT_COMMAND_ID,
   output = "",
+  presentation,
   seq,
   source = "exec_command",
   sourceSeqEnd,
@@ -563,6 +552,7 @@ export function commandRow({
     completedAt: completedAtFromDuration(base.startedAt, durationMs),
     approvalStatus,
     activityIntents,
+    ...(presentation === undefined ? {} : { presentation }),
   };
 }
 

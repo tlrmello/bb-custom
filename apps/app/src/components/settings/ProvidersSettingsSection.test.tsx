@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProviderInfo } from "@bb/domain";
 import { defaultAppSettings } from "@bb/domain";
+import { makeProviderInfo } from "@bb/test-helpers/domain-fixtures";
 import {
   ProvidersSettingsSection,
   reorderProviderIds,
@@ -18,13 +25,10 @@ vi.mock("@/hooks/queries/system-queries", () => ({
 }));
 
 function provider(id: string, displayName: string): ProviderInfo {
-  return {
+  return makeProviderInfo({
     id,
-    pluginId: `provider-${id}`,
     displayName,
     logoUrl: null,
-    available: true,
-    maintenance: { health: false, usage: false, installation: false },
     capabilities: {
       supportsThreadArchive: false,
       supportsThreadRename: false,
@@ -35,8 +39,7 @@ function provider(id: string, displayName: string): ProviderInfo {
       modelCatalogScope: "workspace",
       permissionModes: ["full"],
     },
-    composerActions: [],
-  };
+  });
 }
 
 afterEach(cleanup);
@@ -57,7 +60,11 @@ describe("ProvidersSettingsSection", () => {
       />,
     );
 
-    const rows = screen.getAllByText(/Alpha|Beta|Gamma/);
+    const providersSection = screen
+      .getByRole("heading", { name: "Providers" })
+      .closest("section");
+    if (providersSection === null) throw new Error("Providers section missing");
+    const rows = within(providersSection).getAllByText(/Alpha|Beta|Gamma/);
     expect(rows.map((row) => row.textContent)).toEqual([
       "Alpha",
       "Beta",
@@ -102,6 +109,52 @@ describe("ProvidersSettingsSection", () => {
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
+  });
+
+  it("shows each provider's finished turn display and stores only overrides", () => {
+    mocks.providers = [
+      {
+        ...provider("claude-code", "Claude Code"),
+        completedTurnDisplay: "flat",
+      },
+      provider("codex", "Codex"),
+    ];
+    const onChange = vi.fn();
+    const generalSettings = {
+      ...defaultAppSettings,
+      providerCompletedTurnDisplay: { codex: "flat" as const },
+    };
+    render(
+      <ProvidersSettingsSection
+        disabled={false}
+        generalSettings={generalSettings}
+        onGeneralSettingsChange={onChange}
+      />,
+    );
+
+    const claudeSwitch = screen.getByRole("switch", {
+      name: "Collapse finished Claude Code turns",
+    });
+    const codexSwitch = screen.getByRole("switch", {
+      name: "Collapse finished Codex turns",
+    });
+    expect(claudeSwitch.getAttribute("aria-checked")).toBe("false");
+    expect(codexSwitch.getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(claudeSwitch);
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...defaultAppSettings,
+      providerCompletedTurnDisplay: {
+        codex: "flat",
+        "claude-code": "collapse",
+      },
+    });
+
+    fireEvent.click(codexSwitch);
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...defaultAppSettings,
+      providerCompletedTurnDisplay: {},
+    });
   });
 
   it("builds the complete picker order after a drag", () => {

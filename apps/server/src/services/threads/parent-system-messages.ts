@@ -47,6 +47,11 @@ import {
   startLiveHostCommand,
 } from "../hosts/live-command.js";
 import { queueInputForStartingTurn } from "./thread-turn-starting.js";
+import {
+  ThreadContextClearInProgressError,
+  withThreadSendGuard,
+} from "./thread-context-mutation-guard.js";
+import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 
 const PARENT_SYSTEM_MESSAGE_SOURCE = "tell";
 
@@ -113,6 +118,24 @@ interface QueueReadyParentSystemMessageArgs extends ParentSystemMessageTaxonomy 
 
 interface QueueActiveParentSystemMessageInTransactionArgs extends QueueReadyParentSystemMessageArgs {
   preparedCommand: PreparedTurnSubmitCommandPayload;
+}
+
+function parentSystemTurnRequestFields(
+  args: QueueReadyParentSystemMessageArgs,
+) {
+  return {
+    threadId: args.thread.id,
+    environmentId: args.environment.id,
+    type: "client/turn/requested",
+    input: args.input,
+    execution: args.execution,
+    initiator: "system",
+    senderThreadId: null,
+    systemMessageKind: args.systemMessageKind,
+    systemMessageSubject: args.systemMessageSubject,
+    requestMethod: "turn/start",
+    source: PARENT_SYSTEM_MESSAGE_SOURCE,
+  } as const;
 }
 
 function splitRenderedParentSystemSlot(
@@ -211,17 +234,7 @@ function queueActiveParentSystemMessageInTransaction(
 
   const expectedSteerTurnId = getActiveTurnId({ db: tx }, args.thread.id);
   const request = appendClientTurnEventInTransaction(tx, {
-    threadId: args.thread.id,
-    environmentId: args.environment.id,
-    type: "client/turn/requested",
-    input: args.input,
-    execution: args.execution,
-    initiator: "system",
-    senderThreadId: null,
-    systemMessageKind: args.systemMessageKind,
-    systemMessageSubject: args.systemMessageSubject,
-    requestMethod: "turn/start",
-    source: PARENT_SYSTEM_MESSAGE_SOURCE,
+    ...parentSystemTurnRequestFields(args),
     target: {
       kind: "auto",
       expectedTurnId: expectedSteerTurnId,
@@ -245,12 +258,16 @@ async function queueActiveParentSystemMessage(
 ): Promise<boolean> {
   const expectedSteerTurnId = getActiveTurnId(deps, args.thread.id);
   if (expectedSteerTurnId === null) {
-    queueInputForStartingTurn(deps, {
+    const outcome = queueInputForStartingTurn(deps, {
+      claimed: null,
       input: {
-        content: args.input,
+        input: args.input,
         execution: args.execution,
         payload: { kind: "inline" },
         senderThreadId: null,
+        origin: null,
+        originPluginId: null,
+        requestedBy: null,
         systemNotice: {
           kind: args.systemMessageKind,
           subject: args.systemMessageSubject,
@@ -258,7 +275,23 @@ async function queueActiveParentSystemMessage(
       },
       threadId: args.thread.id,
     });
-    return true;
+    if (outcome.kind === "queued") return true;
+    if (outcome.kind === "dispatched") return false;
+    if (outcome.kind === "retry") {
+      const currentThread = outcome.thread;
+      if (
+        currentThread === null ||
+        currentThread.archivedAt !== null ||
+        currentThread.deletedAt !== null ||
+        currentThread.status === "stopping"
+      ) {
+        return false;
+      }
+      return queueReadyParentSystemMessage(deps, {
+        ...args,
+        thread: currentThread,
+      });
+    }
   }
   const permissionEscalation = resolvePermissionEscalation({
     initiator: "system",
@@ -280,7 +313,6 @@ async function queueActiveParentSystemMessage(
       hostId: args.environment.hostId,
       path: args.environment.path,
       status: args.environment.status,
-      workspaceProvisionType: args.environment.workspaceProvisionType,
     },
   });
 
@@ -338,7 +370,6 @@ async function queueReadyParentSystemMessage(
       hostId: args.environment.hostId,
       path: args.environment.path,
       status: args.environment.status,
-      workspaceProvisionType: args.environment.workspaceProvisionType,
     },
     projectId: args.thread.projectId,
     providerId: args.thread.providerId,
@@ -348,17 +379,7 @@ async function queueReadyParentSystemMessage(
     (tx) => {
       ensureThreadCanStartRequest(args.thread);
       appendPreparedClientTurnRequestedEventWithNotificationInTransaction(tx, {
-        threadId: args.thread.id,
-        environmentId: args.environment.id,
-        type: "client/turn/requested",
-        input: args.input,
-        execution: args.execution,
-        initiator: "system",
-        senderThreadId: null,
-        systemMessageKind: args.systemMessageKind,
-        systemMessageSubject: args.systemMessageSubject,
-        requestMethod: "turn/start",
-        source: PARENT_SYSTEM_MESSAGE_SOURCE,
+        ...parentSystemTurnRequestFields(args),
         target: { kind: "new-turn" },
         requestId,
       });
@@ -411,40 +432,53 @@ export async function queueParentSystemMessage(
   ) {
     return false;
   }
-  if (deps.pendingInteractions.hasPendingThreadInteraction(parentThread.id)) {
-    // A prompt cannot interrupt an open question or approval, and dropping the
-    // notice left the parent believing its child had gone silent (#1650). It
-    // queues on the thread's queue like every other blocked dispatch, carrying
-    // its own taxonomy so the turn it eventually becomes is the same turn it
-    // would have been a moment earlier.
-    const execution = await buildExecutionOptions(deps, {}, {
-      threadId: parentThread.id,
-    });
-    createQueuedThreadMessage(deps.db, deps.hub, {
-      threadId: parentThread.id,
-      content: args.input,
-      senderThreadId: null,
-      model: execution.model,
-      reasoningLevel: execution.reasoningLevel,
-      permissionMode: execution.permissionMode,
-      serviceTier: execution.serviceTier,
-      waitingOn: { kind: "interaction" },
-      sendAt: null,
-      payload: { kind: "inline" },
-      systemNotice: {
-        kind: args.systemMessageKind,
-        subject: args.systemMessageSubject,
-      },
-    });
-    return true;
+  const hasPendingInteraction =
+    deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(parentThread.id);
+  if (!hasPendingInteraction) {
+    try {
+      return await deliverParentSystemMessage(deps, {
+        input: args.input,
+        parentThread,
+        systemMessageKind: args.systemMessageKind,
+        systemMessageSubject: args.systemMessageSubject,
+      });
+    } catch (error) {
+      if (!(error instanceof ThreadContextClearInProgressError)) throw error;
+    }
   }
 
-  return deliverParentSystemMessage(deps, {
-    input: args.input,
-    parentThread,
-    systemMessageKind: args.systemMessageKind,
-    systemMessageSubject: args.systemMessageSubject,
+  const execution = await buildExecutionOptions(
+    deps,
+    {},
+    {
+      threadId: parentThread.id,
+    },
+  );
+  createQueuedThreadMessage(deps.db, deps.hub, {
+    threadId: parentThread.id,
+    content: args.input,
+    senderThreadId: null,
+    origin: null,
+    originPluginId: null,
+    model: execution.model,
+    reasoningLevel: execution.reasoningLevel,
+    permissionMode: execution.permissionMode,
+    serviceTier: execution.serviceTier,
+    waitingOn: { kind: hasPendingInteraction ? "interaction" : "thread-busy" },
+    sendAt: null,
+    payload: { kind: "inline" },
+    systemNotice: {
+      kind: args.systemMessageKind,
+      subject: args.systemMessageSubject,
+    },
   });
+  if (!hasPendingInteraction) {
+    requestQueuedMessageDispatch(deps, {
+      kind: "thread-ready",
+      threadId: parentThread.id,
+    });
+  }
+  return true;
 }
 
 interface DeliverParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
@@ -461,6 +495,15 @@ interface DeliverParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
  * that could queue a second copy of the same notice.
  */
 export async function deliverParentSystemMessage(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  args: DeliverParentSystemMessageArgs,
+): Promise<boolean> {
+  return withThreadSendGuard(args.parentThread.id, () =>
+    deliverParentSystemMessageWithContextGuard(deps, args),
+  );
+}
+
+async function deliverParentSystemMessageWithContextGuard(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: DeliverParentSystemMessageArgs,
 ): Promise<boolean> {

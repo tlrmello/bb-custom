@@ -8,11 +8,8 @@ import {
   setPluginSlotRegistrations,
 } from "@/lib/plugin-slots";
 import { threadListProviderAtom } from "@/components/sidebar/threadListProvider";
-import {
-  AUTOMATIC_REPLACEMENT_PROVIDER,
-  BUILT_IN_REPLACEMENT_PROVIDER,
-} from "@/lib/plugin-replacement-preference";
 import { SidebarThreadListSetting } from "./SidebarThreadListSetting";
+import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 
 afterEach(() => {
   cleanup();
@@ -21,23 +18,31 @@ afterEach(() => {
 });
 
 describe("SidebarThreadListSetting", () => {
-  it("defaults to automatic and lets the user pin BB's list", async () => {
-    setPluginSlotRegistrations("inbox", {
-      homepageSections: [],
-      settingsSections: [],
-      navPanels: [],
-      threadPanelActions: [],
-      sidebarFooterActions: [],
-      threadLists: [
-        {
-          id: "inbox",
-          title: "Inbox",
-          component: () => null,
-        },
-      ],
-      fileOpeners: [],
-      messageDirectives: [],
-    });
+  it("defaults to Thread list and offers only explicit plugin choices", async () => {
+    setPluginSlotRegistrations(
+      "inbox",
+      makePluginRegistrationSet({
+        threadLists: [
+          {
+            id: "inbox",
+            title: "Inbox",
+            component: () => null,
+          },
+        ],
+      }),
+    );
+    setPluginSlotRegistrations(
+      "thread-list",
+      makePluginRegistrationSet({
+        threadLists: [
+          {
+            id: "thread-list",
+            title: "Thread list",
+            component: () => null,
+          },
+        ],
+      }),
+    );
     const store = createStore();
     render(
       <JotaiProvider store={store}>
@@ -46,18 +51,18 @@ describe("SidebarThreadListSetting", () => {
     );
 
     expect(store.get(threadListProviderAtom)).toBe(
-      AUTOMATIC_REPLACEMENT_PROVIDER,
+      "thread-list/thread-list",
     );
     const trigger = screen.getByRole("button", {
       name: "Sidebar thread list",
     });
-    expect(trigger.textContent).toContain("Automatic");
+    expect(trigger.textContent).toContain("Thread list");
 
     fireEvent.pointerDown(trigger, { button: 0 });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /built-in/u }));
+    expect(screen.queryByRole("menuitem", { name: /built-in/u })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /Automatic/u })).toBeNull();
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^Inbox/u }));
 
-    expect(store.get(threadListProviderAtom)).toBe(
-      BUILT_IN_REPLACEMENT_PROVIDER,
-    );
+    expect(store.get(threadListProviderAtom)).toBe("inbox/inbox");
   });
 });

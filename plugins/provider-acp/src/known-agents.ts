@@ -60,6 +60,10 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       command: "cursor-agent",
       args: ["acp"],
       env: {},
+      modelCli: {
+        listArgs: ["--list-models"],
+        primaryModels: [],
+      },
       nativeSkillRoots: {
         user: recursiveRoots([
           ".cursor/skills",
@@ -88,6 +92,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     installUrl: "https://opencode.ai/docs",
     visibility: "installed",
     dialect: "opencode",
+    providerUsage: true,
     supportsManualCompaction: true,
     fork: "tip",
     launch: {
@@ -114,6 +119,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     signInCommand: "omp login",
     installUrl: "https://github.com/can1357/omp",
     visibility: "installed",
+    supportsManualCompaction: true,
     fork: "tip",
     launch: {
       displayName: "omp",
@@ -148,31 +154,15 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     visibility: "installed",
     dialect: "grok",
     fork: "none",
-    reasoningLevels: ["low", "medium", "high"],
+    reasoningProbePriorityModelIds: ["grok-4.6", "grok-4.5"],
     launch: {
       displayName: "Grok Build",
       command: "grok",
       args: ["agent", "stdio"],
       env: {},
-      modelCli: {
-        listArgs: ["models"],
-        selectFlag: "--model",
-        primaryModels: ["grok-4.5", "grok-composer-2.5-fast"],
-      },
       permissionCli: {
         full: ["--always-approve"],
         insertAfterArgs: 1,
-      },
-      reasoningCli: {
-        flag: "--reasoning-effort",
-        supportedLevels: ["low", "medium", "high"],
-        levelValues: {
-          none: "low",
-          xhigh: "high",
-          ultracode: "high",
-          max: "high",
-        },
-        defaultLevel: "high",
       },
       nativeSkillRoots: {
         user: recursiveRoots([".agents/skills"]),

@@ -19,9 +19,10 @@ function untypedHref(pathname: string, params?: HrefParams): Href {
   return href as Href;
 }
 
-export function firstParam(value: string | string[] | undefined): string {
-  const raw = Array.isArray(value) ? value[0] : value;
-  return raw?.trim() ?? "";
+export function firstParam(
+  value: string | string[] | undefined,
+): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 export function rawPathHref(path: string): Href {
@@ -53,11 +54,7 @@ export function connectEnrollHref(params: ConnectEnrollHrefParams = {}): Href {
   });
 }
 
-export function serversHref(): Href {
-  return untypedHref("/settings/servers");
-}
-
-type SettingsSectionRoute = "device" | "appearance";
+type SettingsSectionRoute = "device" | "appearance" | "notifications";
 
 export function settingsSectionHref(section: SettingsSectionRoute): Href {
   return untypedHref(`/settings/${section}`);

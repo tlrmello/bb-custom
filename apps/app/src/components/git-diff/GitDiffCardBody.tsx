@@ -1,3 +1,4 @@
+import { DiffLoadingSkeleton } from "@/components/code/code-loading-skeletons";
 import {
   type CSSProperties,
   type RefCallback,
@@ -20,7 +21,6 @@ import {
   ImageLightbox,
   IMAGE_TRANSPARENCY_CHECKER_STYLE,
 } from "@/components/ui/image-lightbox.js";
-import { Skeleton } from "@bb/shared-ui/skeleton";
 import {
   formatGitDiffFileLabel,
   isPreviewableImagePath,
@@ -218,7 +218,6 @@ function svgTextToDataUrl(contents: string): string | null {
 interface UseGitDiffCardBodyArgs {
   fileDiff: ParsedGitDiffFile;
   changeKind: GitDiffFileChangeKind;
-  isRendering: boolean;
   onRequestFileContents: RequestDiffFileContents | undefined;
   patchText?: string;
 }
@@ -242,7 +241,6 @@ interface GitDiffCardBodyState {
 export function useGitDiffCardBody({
   fileDiff,
   changeKind,
-  isRendering,
   onRequestFileContents,
   patchText,
 }: UseGitDiffCardBodyArgs): GitDiffCardBodyState {
@@ -287,8 +285,7 @@ export function useGitDiffCardBody({
   }, [isBodyVisible]);
   const shouldGateDeletedDiff =
     isDeletedFile && !isImageCard && !isSvgCard && !hasLoadedDeletedDiff;
-  const shouldRenderDiffView =
-    hasBodyEnteredViewport && !isRendering && !shouldGateDeletedDiff;
+  const shouldRenderDiffView = hasBodyEnteredViewport && !shouldGateDeletedDiff;
   const needsContentsToRender = isImageCard || isSvgCard;
   const canExpandContext =
     !needsContentsToRender &&
@@ -475,19 +472,6 @@ function getDiffContextExpansionStatus({
   }
 }
 
-export function GitDiffCardBodySkeleton() {
-  return (
-    <div className="space-y-1.5 px-3 py-3">
-      <Skeleton className="h-3 w-full rounded-sm" />
-      <Skeleton className="h-3 w-[96%] rounded-sm" />
-      <Skeleton className="h-3 w-[93%] rounded-sm" />
-      <Skeleton className="h-3 w-[90%] rounded-sm" />
-      <Skeleton className="h-3 w-[87%] rounded-sm" />
-      <Skeleton className="h-3 w-[84%] rounded-sm" />
-    </div>
-  );
-}
-
 interface GitDiffCardImageSide {
   url: string;
   caption: string | null;
@@ -658,7 +642,7 @@ function GitDiffCardImageBody({
   fitToFrame = false,
 }: GitDiffCardImageBodyProps) {
   if (enrichment.status === "idle" || enrichment.status === "loading") {
-    return <GitDiffCardBodySkeleton />;
+    return <DiffLoadingSkeleton />;
   }
   const preview = getGitDiffCardImageUrls(enrichment);
   if (preview === null) {
@@ -770,7 +754,7 @@ export function GitDiffCardBody({
           </span>
         </div>
       ) : !shouldRenderDiffView ? (
-        <GitDiffCardBodySkeleton />
+        <DiffLoadingSkeleton />
       ) : isImageCard ? (
         <GitDiffCardImageBody
           enrichment={enrichment}
@@ -794,7 +778,7 @@ export function GitDiffCardBody({
             patchText={patchText}
             fullFileContents={fullFileContents}
             {...presentation}
-            fallback={<GitDiffCardBodySkeleton />}
+            fallback={<DiffLoadingSkeleton />}
             onSelectionAddToChat={onSelectionAddToChat}
           />
           <GitDiffCardContextExpansionFooter

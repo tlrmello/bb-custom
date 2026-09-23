@@ -36,9 +36,11 @@ describe("experiments", () => {
           .map((row) => row.key),
       ).toEqual([
         "changelogPreview",
-        "editMessages",
         "futureExperiment",
         "mobileApp",
+        "multiMachinePicker",
+        "serverMove",
+        "sidebarProgressiveDisclosure",
         "timelineWindowing",
       ]);
     } finally {

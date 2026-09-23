@@ -26,6 +26,11 @@ function group<Module>(
 
 export const CORE_COMMAND_GROUPS: readonly CommandGroup[] = [
   group(
+    "browser",
+    () => import("./commands/browser.js"),
+    (m) => (program, deps) => m.registerBrowserCommands(program, deps.getUrl),
+  ),
+  group(
     "status",
     () => import("./commands/status.js"),
     (m) => (program, deps) =>
@@ -55,6 +60,11 @@ export const CORE_COMMAND_GROUPS: readonly CommandGroup[] = [
     "machine",
     () => import("./commands/machine.js"),
     (m) => (program, deps) => m.registerMachineCommands(program, deps.getUrl),
+  ),
+  group(
+    "server",
+    () => import("./commands/server.js"),
+    (m) => (program, deps) => m.registerServerCommands(program, deps.getUrl),
   ),
   group(
     "updates",
@@ -108,6 +118,11 @@ export const CORE_COMMAND_GROUPS: readonly CommandGroup[] = [
     "guide",
     () => import("./commands/guide.js"),
     (m) => (program) => m.registerGuideCommand(program),
+  ),
+  group(
+    "diagnostics",
+    () => import("./commands/diagnostics.js"),
+    (m) => (program) => m.registerDiagnosticsCommands(program),
   ),
   group(
     "voice",

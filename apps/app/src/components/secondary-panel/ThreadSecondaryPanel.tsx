@@ -1,8 +1,10 @@
+import { usePluginDetailPanelProps } from "@/components/plugin/plugin-detail-navigation";
 import {
   type CSSProperties,
   type FocusEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type RefObject,
   type TransitionEvent,
   useCallback,
   useContext,
@@ -26,11 +28,14 @@ import {
 import { cn } from "@bb/shared-ui/lib/utils";
 import {
   PANEL_COLLAPSE_TRANSITION_CLASS,
-  PANEL_RESIZE_HIT_AREA_MARGINS,
   PANEL_RESIZE_HANDLE_LAYER_CLASS,
   PANEL_RESIZE_HIT_TARGET_CLASS,
 } from "./panelTransitionTokens";
-import { SECONDARY_PANEL_TOP_CHROME_BACKGROUND_CLASS } from "./panelChromeClasses";
+import {
+  PANEL_SCROLL_SLOT_CLASS,
+  PANEL_TAB_CONTROL_CLASS,
+  SECONDARY_PANEL_TOP_CHROME_BACKGROUND_CLASS,
+} from "./panelChromeClasses";
 import {
   CONVERSATION_COLLAPSED_PANEL_SIZE_PERCENT,
   THREAD_SECONDARY_PANEL_MAX_SIZE_PERCENT,
@@ -41,17 +46,17 @@ import {
   resolveConversationCollapseControl,
 } from "./panelToggleControlState";
 import { SecondaryPanelHostLayoutContext } from "./SecondaryPanelHostLayoutContext";
+import { MobilePanelTabPager } from "./MobilePanelTabPager";
 import { SecondaryPanelTabStrip } from "./SecondaryPanelTabStrip";
+import { ImageTabLightboxProvider } from "./ImageTabLightboxContext";
 import type {
+  MarketplacePluginDetailPanelTab,
   SecondaryPanelPaneRenderContext,
   SecondaryPanelRenderableTab,
   SecondaryPanelTabReorderHandler,
 } from "./secondaryPanelTab";
 import { useEnvironmentDiffFiles } from "@/hooks/queries/environment-queries";
-import {
-  DEFAULT_CODE_OVERFLOW_MODE,
-  type CodeOverflowMode,
-} from "@/lib/code-overflow-mode";
+import { useGitDiffLineOverflowModePreference } from "@/lib/git-diff-view-preferences";
 import type { DiffPresentation } from "@/components/code/code-rendering";
 import { useGitDiffPanelState } from "./git-diff/useGitDiffPanelState";
 import { useResponsiveGitDiffPanelDisplay } from "./git-diff/useResponsiveGitDiffPanelDisplay";
@@ -60,17 +65,13 @@ import {
   useDiffFilesCollapseControls,
 } from "./git-diff/diffFilesStore";
 import { buildGitDiffIdentity } from "./git-diff/gitDiffPanelHelpers";
-import {
-  type SecondaryPanelDraggingHandler,
-  useSecondaryPanelResize,
-} from "./useSecondaryPanelResize";
+import { useSecondaryPanelResize } from "./useSecondaryPanelResize";
 import { threadSecondaryPanelResizingAtom } from "./threadSecondaryPanelAtoms";
 import { GitDiffToolbar } from "./GitDiffToolbar";
 import { GitDiffTabContent } from "./ThreadSecondaryPanelTabContent";
 import {
   CHROME_ROW_CLASS,
   getBbDesktopInfo,
-  MACOS_APP_REGION_NO_DRAG_CLASS,
   MACOS_CHROME_CONTROL_AXIS_CLASS,
   MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS,
   MACOS_WINDOW_DRAG_CLASS,
@@ -81,9 +82,9 @@ import {
 import { useDesktopWindowState } from "@/hooks/useDesktopWindowState";
 import { useOptionalIsSidebarShowing } from "@/components/ui/sidebar.js";
 import { IframeDragGuardOverlay } from "@/lib/iframe-drag-guard";
-import {
-  type FixedPanelViewTab,
-  type SecondaryFixedPanelTab,
+import type {
+  FixedPanelViewTab,
+  SecondaryFixedPanelTab,
 } from "@/lib/fixed-panel-tabs-state";
 import { useAppCommandShortcut } from "@/components/commands/AppCommandProvider";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
@@ -110,23 +111,12 @@ export function isSecondaryPanelLayoutTransition(
 ): boolean {
   return propertyName === "flex-grow" || propertyName === "flex-basis";
 }
-const PANEL_SCROLL_SLOT_CLASS =
-  "min-h-0 flex-1 overflow-x-auto overflow-y-auto";
 const SECONDARY_RESIZABLE_PANEL_STYLE: CSSProperties = {
   pointerEvents: "auto",
 };
 const SECONDARY_PANEL_CHROME_ICON_BUTTON_CLASS = `${COARSE_POINTER_COMPACT_ICON_BUTTON_CLASS} shrink-0 ${CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS}`;
 const SECONDARY_PANEL_HIDE_ICON_BUTTON_CLASS = `${COARSE_POINTER_HEADER_ICON_BUTTON_CLASS} shrink-0 ${CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS}`;
 const EMPTY_DIFF_FILES: readonly DiffFileEntry[] = [];
-
-export function getReservedInlinePanelToggleClassName(
-  usesDesktopChrome: boolean,
-): string {
-  return cn(
-    SECONDARY_PANEL_HIDE_ICON_BUTTON_CLASS,
-    usesDesktopChrome && MACOS_APP_REGION_NO_DRAG_CLASS,
-  );
-}
 
 export function getSecondaryPanelChromeStackClassName(
   hasGitDiffToolbar: boolean,
@@ -152,10 +142,9 @@ export function resolveCollapsedPanelTrafficLightReserveClassName({
   reserveMacosTrafficLights,
 }: CollapsedPanelTrafficLightReserveArgs): string | false {
   const reserves =
-    isConversationCollapsed &&
-    !renderAsDrawer &&
-    isSidebarShowing === false &&
-    reserveMacosTrafficLights;
+    reserveMacosTrafficLights &&
+    (renderAsDrawer ||
+      (isConversationCollapsed && isSidebarShowing === false));
   return reserves && MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS;
 }
 
@@ -173,8 +162,9 @@ export interface SecondaryPanelFixedTab {
 }
 
 export interface ThreadSecondaryPanelProps {
-  activeTab: SecondaryFixedPanelTab | null;
+  activeTab: SecondaryFixedPanelTab | MarketplacePluginDetailPanelTab | null;
   canUseGitUi: boolean;
+  canNavigateTabs?: boolean;
   gitDiffTabStatus?: GitDiffTabStatus;
   onRetryGitDiffEligibility?: () => void;
   requestedMergeBaseBranch?: string;
@@ -191,7 +181,7 @@ export interface ThreadSecondaryPanelProps {
   isOpen: boolean;
   showConversationCollapseControl?: boolean;
   showNewTabButton?: boolean;
-  inlinePanelToggle?: "button" | "reserved" | "hidden";
+  inlinePanelToggle?: "button" | "hidden";
   resizablePanelId?: string;
   onPanelFocus: () => void;
   onCollapse: () => void;
@@ -209,9 +199,15 @@ export interface ThreadSecondaryPanelProps {
   renderAsDrawer: boolean;
 }
 
-export function ThreadSecondaryPanel({
+export function ThreadSecondaryPanel(props: ThreadSecondaryPanelProps) {
+  const panelProps = usePluginDetailPanelProps(props);
+  return <ThreadSecondaryPanelContent {...panelProps} />;
+}
+
+function ThreadSecondaryPanelContent({
   activeTab,
   canUseGitUi,
+  canNavigateTabs = true,
   gitDiffTabStatus,
   requestedMergeBaseBranch,
   environmentId,
@@ -253,11 +249,8 @@ export function ThreadSecondaryPanel({
   );
   const activeRenderableTab =
     tabs.find((tab) => tab.tab.id === activeTab?.id) ??
-    (activeTab === null && fixedTabs.length === 0
-      ? visibleTabs[0]
-      : undefined);
+    (activeTab === null && fixedTabs.length === 0 ? visibleTabs[0] : undefined);
   const hasActiveRenderableTab = activeRenderableTab !== undefined;
-  const hidePanelIconName = RIGHT_PANEL_TOGGLE_ICON_NAME;
   const conversationCollapseControl =
     renderAsDrawer || !showConversationCollapseControl
       ? null
@@ -268,13 +261,11 @@ export function ThreadSecondaryPanel({
   const {
     gitDiffDisplayMode,
     handleGitDiffDisplayModeChange,
-    handleSecondaryPanelResizeStart,
     handleSecondaryPanelWidthChange,
   } = useResponsiveGitDiffPanelDisplay({ isSecondaryPanelOpen: isOpen });
   const {
-    handleSecondaryPanelDragging: handleResizeDragging,
     handleSecondaryPanelResize,
-    handleSecondaryPanelResizePointerDownCapture,
+    resizeHitTargetRef,
     persistedWidthPercent,
     secondaryPanelRef: panelRef,
     secondaryResizablePanelRef: resizablePanelRef,
@@ -282,16 +273,6 @@ export function ThreadSecondaryPanel({
     isSecondaryPanelOpen: isOpen,
     onPanelWidthChange: handleSecondaryPanelWidthChange,
   });
-  const handleSecondaryPanelDragging: SecondaryPanelDraggingHandler =
-    useCallback(
-      (isDragging) => {
-        if (isDragging) {
-          handleSecondaryPanelResizeStart();
-        }
-        handleResizeDragging(isDragging);
-      },
-      [handleResizeDragging, handleSecondaryPanelResizeStart],
-    );
   const hasPanelExpandedRef = useRef(false);
   useLayoutEffect(() => {
     hasPanelExpandedRef.current = false;
@@ -307,7 +288,7 @@ export function ThreadSecondaryPanel({
   );
   const hostLayout = useContext(SecondaryPanelHostLayoutContext);
   const handlePanelCollapse = useCallback(() => {
-    if (hostLayout?.isSuppressed) {
+    if (!isOpen || hostLayout?.isSuppressed) {
       return;
     }
     if (!hasPanelExpandedRef.current) {
@@ -315,7 +296,7 @@ export function ThreadSecondaryPanel({
     }
     hasPanelExpandedRef.current = false;
     onCollapse();
-  }, [hostLayout?.isSuppressed, onCollapse]);
+  }, [hostLayout?.isSuppressed, isOpen, onCollapse]);
   const handlePanelTransitionEnd = useCallback(
     (event: TransitionEvent<HTMLElement>) => {
       if (
@@ -338,8 +319,10 @@ export function ThreadSecondaryPanel({
     resolvedGitDiffTabStatus === "eligible" &&
     activeFixedTab?.tab.kind === "git-diff";
   const isDiffPanelLive = isDiffPanelActive && isLayoutOpen;
-  const isDiffEligibilityPending =
-    activeFixedTab?.tab.kind === "git-diff" &&
+  const isGitDiffEligibilityPending = (
+    kind: FixedPanelViewTab["kind"] | undefined,
+  ) =>
+    kind === "git-diff" &&
     (resolvedGitDiffTabStatus === "loading" ||
       resolvedGitDiffTabStatus === "error");
   const {
@@ -396,7 +379,7 @@ export function ThreadSecondaryPanel({
   );
   const [desktopInfo] = useState(getBbDesktopInfo);
   const [gitDiffLineOverflowMode, setGitDiffLineOverflowMode] =
-    useState<CodeOverflowMode>(DEFAULT_CODE_OVERFLOW_MODE);
+    useGitDiffLineOverflowModePreference();
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
   const desktopWindowState = useDesktopWindowState();
   const isSidebarShowing = useOptionalIsSidebarShowing();
@@ -476,7 +459,10 @@ export function ThreadSecondaryPanel({
       variant="ghost"
       size="icon"
       className={cn(
-        SECONDARY_PANEL_HIDE_ICON_BUTTON_CLASS,
+        renderAsDrawer
+          ? PANEL_TAB_CONTROL_CLASS
+          : SECONDARY_PANEL_HIDE_ICON_BUTTON_CLASS,
+        CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
         "relative",
         usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
       )}
@@ -488,7 +474,7 @@ export function ThreadSecondaryPanel({
       }
       aria-keyshortcuts={togglePanelShortcut?.ariaKeyshortcuts}
     >
-      <Icon name={hidePanelIconName} />
+      <Icon name={RIGHT_PANEL_TOGGLE_ICON_NAME} />
       <AppCommandShortcutHint
         shortcut={togglePanelShortcut}
         className="absolute right-full mr-1"
@@ -503,7 +489,9 @@ export function ThreadSecondaryPanel({
         variant="ghost"
         size="icon"
         className={cn(
-          HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
+          renderAsDrawer
+            ? PANEL_TAB_CONTROL_CLASS
+            : HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
           CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
           "shrink-0",
           usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
@@ -531,7 +519,7 @@ export function ThreadSecondaryPanel({
       return (
         <PaneArrangementButton
           className={cn(
-            "shrink-0",
+            renderAsDrawer ? PANEL_TAB_CONTROL_CLASS : "shrink-0",
             usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
           )}
           isFullScreen={isFullScreen ?? false}
@@ -549,7 +537,9 @@ export function ThreadSecondaryPanel({
             variant="ghost"
             size="icon"
             className={cn(
-              HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
+              renderAsDrawer
+                ? PANEL_TAB_CONTROL_CLASS
+                : HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
               CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
               "shrink-0",
               usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
@@ -584,6 +574,52 @@ export function ThreadSecondaryPanel({
       (tab) => tab.isHidden !== true,
     );
     const hasActiveSurfaceTab = activeSurfaceTab !== undefined;
+    const newTabControl = showGroupNewTabButton ? (
+      <NewTabButton
+        ariaLabel={newTabAriaLabel}
+        onOpenNewTab={onOpenNewTab}
+        shortcut={newTabShortcut}
+        usesDesktopChrome={usesDesktopChrome}
+        compact={renderAsDrawer}
+      />
+    ) : reserveNewTabButton ? (
+      <div
+        aria-hidden
+        data-new-tab-control-reserved=""
+        className={cn(
+          renderAsDrawer
+            ? PANEL_TAB_CONTROL_CLASS
+            : SECONDARY_PANEL_CHROME_ICON_BUTTON_CLASS,
+          usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
+        )}
+      />
+    ) : null;
+
+    if (renderAsDrawer) {
+      return (
+        <MobilePanelTabPager
+          activeTabId={
+            activeSurfaceTabId ?? activeSurfaceFixedTab?.tab.id ?? null
+          }
+          fixedTabs={fixedSurfaceTabs.map((tab) => ({
+            id: tab.tab.id,
+            label: tab.label,
+            ariaLabel: tab.ariaLabel,
+            leadingVisual: tab.leadingVisual,
+            onSelect: tab.onSelect,
+          }))}
+          tabs={visibleSurfaceTabs.map((tab) => ({
+            id: tab.tab.id,
+            label: tab.label,
+            ariaLabel: tab.label,
+            leadingVisual: tab.leadingVisual,
+            onSelect: tab.onSelect,
+            onClose: tab.isPinned ? null : tab.onClose,
+          }))}
+          newTabControl={newTabControl}
+        />
+      );
+    }
 
     return (
       <>
@@ -626,23 +662,7 @@ export function ThreadSecondaryPanel({
             isPanelOpen={isOpen}
           />
         ) : null}
-        {showGroupNewTabButton ? (
-          <NewTabButton
-            ariaLabel={newTabAriaLabel}
-            onOpenNewTab={onOpenNewTab}
-            shortcut={newTabShortcut}
-            usesDesktopChrome={usesDesktopChrome}
-          />
-        ) : reserveNewTabButton ? (
-          <div
-            aria-hidden
-            data-new-tab-control-reserved=""
-            className={cn(
-              SECONDARY_PANEL_CHROME_ICON_BUTTON_CLASS,
-              usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
-            )}
-          />
-        ) : null}
+        {newTabControl}
       </>
     );
   };
@@ -701,7 +721,10 @@ export function ThreadSecondaryPanel({
       activeSurfaceModel?.kind === "terminal" && hasActiveSurfaceTab;
 
     return (
-      <>
+      <ImageTabLightboxProvider
+        activeTabId={activeSurfaceTabId}
+        tabs={surfaceTabs}
+      >
         <div
           className={getSecondaryPanelChromeStackClassName(
             showsSurfaceDiffToolbar,
@@ -711,7 +734,8 @@ export function ThreadSecondaryPanel({
             data-testid="thread-secondary-panel-top-chrome"
             className={cn(
               CHROME_ROW_CLASS,
-              "min-w-0 justify-between gap-2 px-4",
+              "min-w-0 justify-between gap-2",
+              renderAsDrawer ? "px-2" : "px-4",
               usesDesktopChrome && usesWindowChrome && MACOS_WINDOW_DRAG_CLASS,
               usesDesktopChrome &&
                 usesWindowChrome &&
@@ -721,6 +745,7 @@ export function ThreadSecondaryPanel({
             <div
               className={cn(
                 "flex min-w-0 flex-1 items-center gap-1",
+                renderAsDrawer && "gap-0",
                 `transition-[padding] ${PANEL_COLLAPSE_TRANSITION_CLASS}`,
                 reserveLeadingChrome &&
                   collapsedPanelTrafficLightReserveClassName,
@@ -748,7 +773,10 @@ export function ThreadSecondaryPanel({
             onRemoveSplit ||
             usesPaneArrangementControl ? (
               <div
-                className="flex min-w-0 shrink-0 items-center gap-1"
+                className={cn(
+                  "flex min-w-0 shrink-0 items-center gap-1",
+                  renderAsDrawer && "gap-0",
+                )}
                 onPointerDown={(event) => event.stopPropagation()}
               >
                 {usesPaneArrangementControl || showOuterControls
@@ -760,18 +788,10 @@ export function ThreadSecondaryPanel({
                     })
                   : null}
                 {renderRemoveSplitButton(onRemoveSplit)}
-                {showOuterControls ? (
-                  renderAsDrawer || inlinePanelToggle === "button" ? (
-                    renderHidePanelButton()
-                  ) : inlinePanelToggle === "reserved" ? (
-                    <div
-                      aria-hidden
-                      className={getReservedInlinePanelToggleClassName(
-                        usesDesktopChrome,
-                      )}
-                    />
-                  ) : null
-                ) : null}
+                {showOuterControls &&
+                (renderAsDrawer || inlinePanelToggle === "button")
+                  ? renderHidePanelButton()
+                  : null}
               </div>
             ) : null}
           </div>
@@ -853,7 +873,6 @@ export function ThreadSecondaryPanel({
             <GitDiffTabContent
               environmentId={environmentId}
               target={gitDiffTarget}
-              isDiffPanelActive={isSurfaceDiffActive}
               isPanelOpen={isLayoutOpen}
               gitDiffPresentation={gitDiffPresentation}
               onClearPendingGitDiffIntent={onClearPendingGitDiffIntent}
@@ -873,7 +892,7 @@ export function ThreadSecondaryPanel({
             </EmptyStatePanel>
           )}
         </div>
-      </>
+      </ImageTabLightboxProvider>
     );
   };
 
@@ -884,10 +903,12 @@ export function ThreadSecondaryPanel({
         ...fixedTabs.map((fixedTab) => ({
           id: fixedTab.tab.id,
           label: fixedTab.label,
+          restoresPlacementAfterRemoval: true,
         })),
         ...visibleTabs.map((tab) => ({
           id: tab.tab.id,
           label: tab.label,
+          restoresPlacementAfterRemoval: tab.tab.kind !== "new-tab",
         })),
       ] satisfies SidebarSplitTabDescriptor[])
     : [];
@@ -908,6 +929,21 @@ export function ThreadSecondaryPanel({
     <SidebarSplitContainer
       key={splitPanelStateId}
       activeTabId={globalActiveTabId}
+      canNavigateTabs={canNavigateTabs && isLayoutOpen}
+      fixedTabIds={fixedTabs.map((tab) => tab.tab.id)}
+      hasNewTabButton={showNewTabButton}
+      onTabNavigated={(paneId, isNewTabButton) => {
+        window.requestAnimationFrame(() => {
+          const control = isNewTabButton
+            ? "button[data-panel-new-tab]"
+            : 'button[aria-pressed="true"]';
+          panelRef.current
+            ?.querySelector<HTMLElement>(
+              `[data-sidebar-split-tab-group="${CSS.escape(paneId)}"] ${control}`,
+            )
+            ?.focus({ preventScroll: true });
+        });
+      }}
       isFullScreen={isConversationCollapsed}
       onActivateTab={(tabId) => {
         const fixedTab = fixedTabs.find(
@@ -940,10 +976,9 @@ export function ThreadSecondaryPanel({
           fixedSurfaceTabs: paneFixedTabs,
           isFocused: pane.isFocused,
           isFullScreen: pane.isMaximized,
-          isSurfaceDiffEligibilityPending:
-            activePaneFixedTab?.tab.kind === "git-diff" &&
-            (resolvedGitDiffTabStatus === "loading" ||
-              resolvedGitDiffTabStatus === "error"),
+          isSurfaceDiffEligibilityPending: isGitDiffEligibilityPending(
+            activePaneFixedTab?.tab.kind,
+          ),
           onBeginTabDrag: pane.onBeginTabDrag,
           onFocusPane: pane.onFocusPane,
           onMoveActiveTabToSide: pane.onMoveActiveTabToSide,
@@ -969,7 +1004,9 @@ export function ThreadSecondaryPanel({
       surfaceTabs: tabs,
       fixedSurfaceTabs: fixedTabs,
       isFocused: true,
-      isSurfaceDiffEligibilityPending: isDiffEligibilityPending,
+      isSurfaceDiffEligibilityPending: isGitDiffEligibilityPending(
+        activeFixedTab?.tab.kind,
+      ),
       onFocusPane: onPanelFocus,
       onSurfaceTabReorder: onTabReorder,
       paneId: null,
@@ -1028,8 +1065,7 @@ export function ThreadSecondaryPanel({
         isOpen={isOpen}
         isConversationCollapsed={isConversationCollapsed}
         matchesSplitDividers={hostLayout !== null}
-        onDragging={handleSecondaryPanelDragging}
-        onPointerDown={handleSecondaryPanelResizePointerDownCapture}
+        hitTargetRef={resizeHitTargetRef}
       />
       <Panel
         ref={resizablePanelRef}
@@ -1066,6 +1102,7 @@ export function ThreadSecondaryPanel({
 }
 
 interface NewTabButtonProps {
+  compact: boolean;
   ariaLabel: string;
   onOpenNewTab: () => void;
   shortcut: AppShortcutPresentation | null;
@@ -1125,6 +1162,7 @@ function PinnedIconTab({
 }
 
 function NewTabButton({
+  compact,
   ariaLabel,
   onOpenNewTab,
   shortcut,
@@ -1136,10 +1174,14 @@ function NewTabButton({
       variant="ghost"
       size="sm"
       className={cn(
-        SECONDARY_PANEL_CHROME_ICON_BUTTON_CLASS,
+        compact
+          ? PANEL_TAB_CONTROL_CLASS
+          : SECONDARY_PANEL_CHROME_ICON_BUTTON_CLASS,
+        "text-muted-foreground/70 hover:text-foreground focus:ring-1 focus:ring-ring",
         usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
       )}
       onClick={onOpenNewTab}
+      data-panel-new-tab=""
       aria-label={shortcut ? `${ariaLabel} (${shortcut.label})` : ariaLabel}
       aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
     >
@@ -1152,26 +1194,23 @@ interface SecondaryPanelResizeHandleProps {
   isOpen: boolean;
   isConversationCollapsed: boolean;
   matchesSplitDividers: boolean;
-  onDragging: SecondaryPanelDraggingHandler;
-  onPointerDown: (event: PointerEvent) => void;
+  hitTargetRef: RefObject<HTMLSpanElement | null>;
 }
 
 function SecondaryPanelResizeHandle({
   isOpen,
   isConversationCollapsed,
   matchesSplitDividers,
-  onDragging,
-  onPointerDown,
+  hitTargetRef,
 }: SecondaryPanelResizeHandleProps) {
   const isResizing = useAtomValue(threadSecondaryPanelResizingAtom);
   return (
     <PanelResizeHandle
       id="thread-detail-secondary-panel-handle"
       disabled={!isOpen || isConversationCollapsed}
-      onDragging={onDragging}
-      onPointerDownCapture={(event) => onPointerDown(event.nativeEvent)}
       data-panel-resize-snap-handle=""
-      hitAreaMargins={PANEL_RESIZE_HIT_AREA_MARGINS}
+      hitAreaMargins={{ coarse: 0, fine: 0 }}
+      tabIndex={-1}
       className={cn(
         "group relative shrink-0 overflow-visible transition-[width,opacity,background-color]",
         PANEL_RESIZE_HANDLE_LAYER_CLASS,
@@ -1197,6 +1236,7 @@ function SecondaryPanelResizeHandle({
     >
       <span
         aria-hidden
+        ref={hitTargetRef}
         data-panel-resize-hit-target=""
         className={PANEL_RESIZE_HIT_TARGET_CLASS}
       />

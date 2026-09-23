@@ -1,12 +1,9 @@
+import { registerUsageSource } from "./src/usage-source.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import {
-  CLAUDE_CODE_ACTIVE_CATALOG_DATA,
-  CLAUDE_XHIGH_CAPABLE_REASONING_EFFORT_DATA,
-  DEFAULT_CLAUDE_CODE_MODEL,
-} from "./src/model-catalog-data.js";
 import { CLAUDE_NATIVE_ROOTS_DECLARATION } from "./src/native-roots.js";
 
 export default function plugin(bb: BbPluginApi) {
+  registerUsageSource(bb);
   bb.settings.define({
     memoryEnabled: {
       type: "boolean",
@@ -28,11 +25,11 @@ export default function plugin(bb: BbPluginApi) {
       description: "Hide Claude Code's native Workflow tool for bb threads.",
       default: false,
     },
-    idleQueryReleaseEnabled: {
+    chromeEnabled: {
       type: "boolean",
-      label: "Release idle Claude processes",
+      label: "Claude in Chrome",
       description:
-        "Close a quiescent Claude Code process after 30 seconds and resume it on the next turn.",
+        "Start Claude Code with the Claude in Chrome browser tools. Needs the Chrome extension and a claude.ai login on the host.",
       default: false,
     },
   });
@@ -75,25 +72,17 @@ export default function plugin(bb: BbPluginApi) {
       { id: "max", label: "Max" },
     ],
     composerActions: ["plan"],
-    env: { passthrough: ["BB_CLAUDE_CODE_EXECUTABLE"] },
-    models: {
-      scope: "host",
-      fallback: CLAUDE_CODE_ACTIVE_CATALOG_DATA.map((entry) => ({
-        id: entry.model,
-        displayName: entry.displayName,
-        description: entry.description,
-        supportedReasoningEfforts: CLAUDE_XHIGH_CAPABLE_REASONING_EFFORT_DATA,
-        defaultReasoningEffort: entry.defaultReasoningEffort,
-        isDefault: entry.model === DEFAULT_CLAUDE_CODE_MODEL,
-      })),
+    completedTurnDisplay: "flat",
+    env: {
+      passthrough: ["BB_CLAUDE_CODE_EXECUTABLE", "CLAUDE_CODE_OAUTH_TOKEN"],
     },
+    models: { scope: "host" },
     deriveProviderOptions(context) {
       return {
         memoryEnabled: context.settings.memoryEnabled !== false,
         providerSubagentsEnabled: context.settings.subagentsDisabled !== true,
         workflowsEnabled: context.settings.workflowsDisabled !== true,
-        idleQueryReleaseEnabled:
-          context.settings.idleQueryReleaseEnabled === true,
+        chromeEnabled: context.settings.chromeEnabled === true,
         ...(context.promptMode === "plan"
           ? { claudeCodePermissionMode: "plan" }
           : {}),

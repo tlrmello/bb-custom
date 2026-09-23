@@ -301,6 +301,19 @@ describe("MessageActionBar", () => {
     expect(onAddToChat).toHaveBeenCalledWith("", [attachment]);
   });
 
+  it("renders copy for an image-only message", () => {
+    render(
+      <MessageActionBar
+        messageText=""
+        copyImageUrl="/attachments/screenshot.png"
+        alignment="end"
+        mobileActionDisplay="overflow"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeTruthy();
+  });
+
   it("omits the send-to-main action when no handler is supplied", () => {
     render(
       <MessageActionBar
@@ -743,7 +756,7 @@ describe("MessageActionBar shared column width", () => {
 });
 
 describe("computeMessageActionRowLayout", () => {
-  const metrics = { actionWidth: 20, overflowTriggerWidth: 20 };
+  const metrics = { actionWidth: 20 };
 
   it("renders everything inline before the slot is measured", () => {
     expect(

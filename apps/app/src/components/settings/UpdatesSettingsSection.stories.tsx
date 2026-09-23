@@ -21,6 +21,7 @@ import {
   BbAppUpdateRows,
   BbDaemonUpdateRow,
   ChangelogPreviewCard,
+  MachineUpdatesFleetSection,
   MachineUpdatesRows,
   MachineUpdatesSection,
   ProviderCliCheckRow,
@@ -129,10 +130,18 @@ export function ChangelogPreviewExperiment() {
   window.localStorage.removeItem(
     "bb.settings.updates.dismissed-changelog-version",
   );
+  const workstation = machineOf({
+    host: makeHost({ id: "changelog-workstation", name: "workstation" }),
+    isPrimary: true,
+    issues: [updateIssue("codex", "0.145.0", "0.146.0")],
+  });
   return (
-    <SettingsStoryChrome activeSection="updates">
+    <StoryPage>
       <ChangelogPreviewCard />
-    </SettingsStoryChrome>
+      <MachineUpdatesFleetSection>
+        <StoryMachineSection machine={workstation} app />
+      </MachineUpdatesFleetSection>
+    </StoryPage>
   );
 }
 
@@ -140,12 +149,10 @@ function StoryMachineSection({
   machine,
   app = false,
   appUpdate = false,
-  action,
 }: {
   machine: UpdateInventoryMachine;
   app?: boolean;
   appUpdate?: boolean;
-  action?: ReactNode;
 }) {
   const showDaemon =
     machine.canRetryDaemonUpdate || machine.host.status !== "connected";
@@ -153,7 +160,7 @@ function StoryMachineSection({
     <MachineUpdatesSection
       machine={machine}
       isThisMachine={false}
-      action={action}
+      showServerBadge={false}
     >
       {app ? (
         <BbAppUpdateRows
@@ -212,7 +219,11 @@ function StoryAppState({ children }: { children: ReactNode }) {
     isPrimary: true,
   });
   return (
-    <MachineUpdatesSection machine={machine} isThisMachine={false}>
+    <MachineUpdatesSection
+      machine={machine}
+      isThisMachine={false}
+      showServerBadge={false}
+    >
       {children}
     </MachineUpdatesSection>
   );
@@ -472,6 +483,7 @@ export function UpdateStates() {
           <MachineUpdatesSection
             machine={providerInstalling}
             isThisMachine={false}
+            showServerBadge={false}
           >
             <MachineUpdatesRows
               machine={providerInstalling}
@@ -541,10 +553,7 @@ export function MultiMachine() {
 
   return (
     <StoryPage>
-      <StoryMachineSection
-        machine={workstation}
-        app
-        appUpdate
+      <MachineUpdatesFleetSection
         action={
           <div role="toolbar" aria-label="Bulk update actions">
             <UpdateActionButton
@@ -557,9 +566,11 @@ export function MultiMachine() {
             />
           </div>
         }
-      />
-      <StoryMachineSection machine={studioMac} />
-      <StoryMachineSection machine={ciRunner} />
+      >
+        <StoryMachineSection machine={workstation} app appUpdate />
+        <StoryMachineSection machine={studioMac} />
+        <StoryMachineSection machine={ciRunner} />
+      </MachineUpdatesFleetSection>
     </StoryPage>
   );
 }

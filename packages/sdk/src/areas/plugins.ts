@@ -1,6 +1,10 @@
 import { jsonValueSchema, type JsonValue } from "@bb/domain";
 import {
   installedPluginSchema,
+  pluginRpcDiscoveryQuerySchema,
+  pluginRpcDiscoveryResponseSchema,
+  type PluginRpcDiscoveryQuery,
+  type PublishedPluginRpcMethod,
   pluginCatalogInstallPlanResponseSchema,
   pluginCatalogInstallRequestSchema,
   pluginCatalogSearchResponseSchema,
@@ -14,7 +18,7 @@ import {
   pluginMarketplaceRemoveResponseSchema,
   pluginApplyUpdateRequestSchema,
   pluginApplyUpdateResultSchema,
-  pluginInstallSourceRequestSchema,
+  pluginInstallRequestSchema,
   pluginRemoveResponseSchema,
   pluginSettingsResponseSchema,
   pluginSettingsUpdateRequestSchema,
@@ -26,6 +30,7 @@ import {
   type InstalledPlugin,
   type PluginCatalogInstallPlan as PluginCatalogInstallPlanContract,
   type PluginCatalogResolvedSource,
+  type PluginCatalogSearchResponse as PluginCatalogSearchResponseContract,
   type PluginCatalogSearchResult as PluginCatalogSearchContract,
   type PluginMarketplace as PluginMarketplaceContract,
   type PluginMarketplaceRefreshResult as PluginMarketplaceRefreshContract,
@@ -51,6 +56,8 @@ import type { CreateSdkAreaArgs } from "./common.js";
  * default on the contract would leak into request bodies.
  */
 const installedPluginResponseSchema = installedPluginSchema.extend({
+  screenshots: installedPluginSchema.shape.screenshots.default([]),
+  collections: installedPluginSchema.shape.collections.default([]),
   providerIds: z.array(z.string()).default([]),
   icons: z.record(z.string(), z.string()).default({}),
 });
@@ -65,6 +72,12 @@ const pluginReloadResponseSchema = z.object({
   ok: z.literal(true),
   plugins: z.array(installedPluginResponseSchema),
 });
+const pluginCatalogSearchResponseCompatibilitySchema =
+  pluginCatalogSearchResponseSchema.extend({
+    collections: pluginCatalogSearchResponseSchema.shape.collections.default(
+      [],
+    ),
+  });
 
 export const pluginMutationResponseSchema = z.object({
   ok: z.boolean(),
@@ -133,6 +146,7 @@ export interface PluginCheckUpdatesArgs {
 }
 
 export interface PluginRpcArgs<TOutput> extends PluginIdArgs {
+  signal?: AbortSignal;
   input?: JsonValue;
   method: string;
   outputSchema: z.ZodType<TOutput>;
@@ -177,7 +191,8 @@ export type PluginCheckUpdatesResult = PluginUpdateCheckEntry[];
 export type PluginApplyUpdateResult = PluginApplyUpdateContract;
 
 export type PluginCatalogStatusResult = PluginCatalogStatusContract;
-export type PluginCatalogSearchResult = PluginCatalogSearchContract[];
+export type PluginCatalogSearchEntry = PluginCatalogSearchContract;
+export type PluginCatalogSearchResult = PluginCatalogSearchResponseContract;
 export type PluginCatalogInstallPlanResult = PluginCatalogInstallPlanContract;
 export type PluginMarketplaceListResult = PluginMarketplaceContract[];
 export type PluginMarketplaceAddResult = PluginMarketplaceContract;
@@ -208,6 +223,9 @@ export interface PluginMarketplacesArea {
 }
 
 export interface PluginsArea {
+  experimental_discoverRpc(
+    args?: PluginRpcDiscoveryQuery,
+  ): Promise<PublishedPluginRpcMethod[]>;
   applyUpdate(args: PluginIdArgs): Promise<PluginApplyUpdateResult>;
   callRpc<TOutput>(args: PluginRpcArgs<TOutput>): Promise<TOutput>;
   checkUpdates(
@@ -302,10 +320,10 @@ export function createPluginsArea(args: CreateSdkAreaArgs): PluginsArea {
       const query = z.string().parse(input.query);
       const response = await requestParsed(
         `/api/v1/plugin-catalog/search?q=${encodeURIComponent(query)}`,
-        pluginCatalogSearchResponseSchema,
+        pluginCatalogSearchResponseCompatibilitySchema,
         { signal: input.signal },
       );
-      return response.results;
+      return response;
     },
     async status(input = {}) {
       const response = await requestParsed(
@@ -366,11 +384,21 @@ export function createPluginsArea(args: CreateSdkAreaArgs): PluginsArea {
         jsonInit("POST", body),
       );
     },
+    async experimental_discoverRpc(input = {}) {
+      const query = pluginRpcDiscoveryQuerySchema.parse(input);
+      const params = new URLSearchParams();
+      if (query.pluginId !== undefined) params.set("pluginId", query.pluginId);
+      if (query.method !== undefined) params.set("method", query.method);
+      return requestParsed(
+        `/api/v1/plugins/rpc?${params}`,
+        pluginRpcDiscoveryResponseSchema,
+      );
+    },
     async callRpc(input) {
       const envelope = await requestParsed(
         pluginPath(input.pluginId, `/rpc/${encodeURIComponent(input.method)}`),
         z.object({ ok: z.literal(true), result: jsonValueSchema }),
-        jsonInit("POST", input.input ?? null),
+        { ...jsonInit("POST", input.input ?? null), signal: input.signal },
       );
       return input.outputSchema.parse(envelope.result);
     },
@@ -428,7 +456,7 @@ export function createPluginsArea(args: CreateSdkAreaArgs): PluginsArea {
         selection === undefined
           ? { source: input.source }
           : { source: input.source, selection };
-      pluginInstallSourceRequestSchema.parse(body);
+      pluginInstallRequestSchema.parse(body);
       const response = await requestParsed(
         "/api/v1/plugins/install",
         pluginInstallResponseSchema,

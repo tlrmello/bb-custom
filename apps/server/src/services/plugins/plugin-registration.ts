@@ -1,6 +1,7 @@
+import { findProviderEnvironmentContainingPath } from "@bb/db";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { isBbManagedWorkspacePath } from "../threads/worktree-paths.js";
+import { isBbManagedWorkspacePath } from "../threads/workspace-paths.js";
 import {
   getInstalledPlugin,
   getInstalledPluginRegistration,
@@ -20,8 +21,13 @@ import {
   builtinPluginSource,
   type BundledPluginRegistration,
 } from "./builtin-registry.js";
-import { CURATED_MARKETPLACE_NAME } from "../plugin-catalog/marketplace-manifest.js";
-import type { PluginSourceSelection } from "@bb/server-contract";
+import { BUNDLED_MARKETPLACE_NAME } from "../plugin-catalog/marketplace-manifest.js";
+import {
+  CURATED_PLUGIN_MARKETPLACE_NAME,
+  type InstalledPlugin,
+  type PluginRuntimeStatus,
+  type PluginSourceSelection,
+} from "@bb/server-contract";
 import type { TelemetryEvent } from "../system/telemetry.js";
 import { resolveSelectedSubdirectory } from "./collection-manifest.js";
 import {
@@ -38,11 +44,7 @@ import type {
   InstallRegistrationIdentity,
   RegisterInstalledArgs,
 } from "./managed-plugin-artifacts.js";
-import type {
-  PluginListEntry,
-  PluginRuntimeStatus,
-  PluginServiceDeps,
-} from "./plugin-service-internal.js";
+import type { PluginServiceDeps } from "./plugin-service-internal.js";
 import {
   gitResolvedVersion,
   resolveGitRef,
@@ -59,7 +61,8 @@ export function pluginInstalledTelemetryEvent(
   const isPublic =
     provenance.kind === "builtin" ||
     (provenance.kind === "catalog" &&
-      provenance.marketplace === CURATED_MARKETPLACE_NAME);
+      (provenance.marketplace === CURATED_PLUGIN_MARKETPLACE_NAME ||
+        provenance.marketplace === BUNDLED_MARKETPLACE_NAME));
   return {
     name: "plugin_installed",
     properties: {
@@ -89,7 +92,8 @@ interface PluginRegistrationContext {
   checkPluginSdkRange: (manifest: PluginManifest) => string | undefined;
   syncCliSkill: () => Promise<void>;
   notifyPluginsChanged: () => void;
-  list: () => PluginListEntry[];
+  list: () => InstalledPlugin[];
+  runInstallHandlers: (id: string) => Promise<void>;
 }
 
 export function createPluginRegistration(context: PluginRegistrationContext) {
@@ -106,6 +110,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     syncCliSkill,
     notifyPluginsChanged,
     list,
+    runInstallHandlers,
   } = context;
   const logger = deps.logger;
 
@@ -304,7 +309,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
 
   async function registerInstalled(
     args: RegisterInstalledArgs,
-  ): Promise<PluginListEntry> {
+  ): Promise<InstalledPlugin> {
     const initialManifest =
       args.preparedManifest ?? (await readPluginManifest(args.rootDir));
     assertInstallRegistrationAvailable(
@@ -331,8 +336,10 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     const manifest = args.validated
       ? initialManifest
       : await validateInstallDir(args);
+    let isFreshInstall = false;
     await withLifecycleLock(manifest.id, async () => {
       const existing = getInstalledPlugin(deps.db, manifest.id);
+      isFreshInstall = existing === undefined;
       assertInstallRegistrationAvailable(existing, args, manifest.id);
       const movedFrom = pathSourceMoveFrom(existing, args);
       await disposeOne(manifest.id);
@@ -384,6 +391,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     });
     await syncCliSkill();
     notifyPluginsChanged();
+    if (isFreshInstall) await runInstallHandlers(manifest.id);
     const entry = list().find((p) => p.id === manifest.id);
     if (!entry) throw new Error(`plugin ${manifest.id} missing after install`);
     deps.telemetry.capture(
@@ -399,7 +407,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
   async function installPathSource(
     path: string,
     selection: PluginSourceSelection,
-  ): Promise<PluginListEntry> {
+  ): Promise<InstalledPlugin> {
     const checkoutDir = resolve(path);
     const subdirectory = await resolveSelectedSubdirectory({
       checkoutDir,
@@ -414,7 +422,10 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
             pluginRootDir(checkoutDir, subdirectory),
             "plugin subdirectory",
           );
-    if (isBbManagedWorkspacePath({ dataDir: deps.dataDir, path: rootDir })) {
+    if (
+      isBbManagedWorkspacePath({ dataDir: deps.dataDir, path: rootDir }) ||
+      findProviderEnvironmentContainingPath(deps.db, rootDir) !== null
+    ) {
       logger.warn(
         `plugin "${rootDir}" is installed from inside a bb-managed workspace; ` +
           "its source will be deleted when that environment is destroyed (e.g. when the owning thread is archived). " +
@@ -502,7 +513,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
   }
 
   function catalogMarketplaceOf(row: InstalledPluginRow): string {
-    return row.catalogMarketplaceName ?? CURATED_MARKETPLACE_NAME;
+    return row.catalogMarketplaceName ?? CURATED_PLUGIN_MARKETPLACE_NAME;
   }
 
   function provenanceForRow(row: InstalledPluginRow): PluginProvenance {
@@ -591,19 +602,31 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
 
   function bundledPluginProvenance(
     plugin: BundledPluginRegistration,
+    existing?: InstalledPluginRow,
   ): PluginProvenance {
+    if (
+      existing?.provenance === "catalog" &&
+      (catalogMarketplaceOf(existing) === CURATED_PLUGIN_MARKETPLACE_NAME ||
+        catalogMarketplaceOf(existing) === BUNDLED_MARKETPLACE_NAME)
+    ) {
+      return {
+        kind: "catalog",
+        marketplace: BUNDLED_MARKETPLACE_NAME,
+        entryId: plugin.name,
+      };
+    }
     return plugin.autoInstall
       ? { kind: "builtin" }
       : {
           kind: "catalog",
-          marketplace: CURATED_MARKETPLACE_NAME,
+          marketplace: BUNDLED_MARKETPLACE_NAME,
           entryId: plugin.name,
         };
   }
 
   async function installBuiltinSource(
     parsed: Extract<ReturnType<typeof parsePluginSource>, { kind: "builtin" }>,
-  ): Promise<PluginListEntry> {
+  ): Promise<InstalledPlugin> {
     const bundled = findBundledPlugin(parsed.name);
     if (!bundled) {
       throw new Error(`unknown builtin plugin "${parsed.name}"`);
@@ -622,7 +645,6 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
   async function reconcileBundled(): Promise<void> {
     for (const bundled of bundledPlugins) {
       const source = builtinPluginSource(bundled.name);
-      const provenance = bundledPluginProvenance(bundled);
       let manifest: PluginManifest;
       try {
         manifest = await readPluginManifest(bundled.rootDir);
@@ -635,6 +657,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
         continue;
       }
       const existing = getInstalledPluginRegistration(deps.db, manifest.id);
+      const provenance = bundledPluginProvenance(bundled, existing);
       if (existing?.removedAt !== null && existing?.removedAt !== undefined) {
         continue;
       }

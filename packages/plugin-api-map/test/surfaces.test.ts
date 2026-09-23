@@ -26,21 +26,23 @@ function surfaceIds(groupId: string): string[] {
 }
 
 describe("product-map surfaces", () => {
-  it("keeps app-window annotations in their stable sequential order", () => {
+  it("keeps app-window annotations in column-major visual reading order", () => {
     const ordered = [
-      "nav-panel",
       "sidebar-navigation",
-      "thread-list",
+      "nav-panel",
       "thread-row-status",
+      "thread-list",
       "sidebar-footer",
       "thread-header",
+      "timeline-renderers",
       "message-directives",
       "message-actions",
       "pending-interaction",
       "code-renderers",
+      "browser-toolbar",
       "thread-panel",
       "file-opener",
-      "timeline-renderers",
+      "app-overlay",
       "content-scripts",
     ];
     expect(surfaceIds("app-shell")).toEqual(ordered);
@@ -50,6 +52,20 @@ describe("product-map surfaces", () => {
   it("gives command palette actions their own numbered page", () => {
     expect(surfaceIds("command-palette")).toEqual(["command-palette-actions"]);
     expect([...COMMAND_PALETTE_MARKS]).toEqual(["command-palette-actions"]);
+  });
+
+  it("reads composer annotations from the banner through the draft and action row", () => {
+    const ordered = [
+      "composer-banners",
+      "composer-state",
+      "mention-provider",
+      "composer-rich-text",
+      "composer-plus-menu",
+      "provider-picker",
+      "composer-actions",
+    ];
+    expect(surfaceIds("composer")).toEqual(ordered);
+    expect([...COMPOSER_MARKS]).toEqual(ordered);
   });
 
   it("has globally unique surface ids", () => {
@@ -184,6 +200,49 @@ describe("surface cross-references", () => {
 });
 
 describe("surface card copy", () => {
+  it("lists every environment orchestration symbol and lifecycle event", () => {
+    const environmentProviders = SURFACES_BY_ID.get("environment-providers");
+    expect(environmentProviders?.apiSymbols).toEqual(
+      expect.arrayContaining([
+        "PluginEnvironmentProviderCreateContext",
+        "PluginEnvironmentProviderProgress",
+        "PluginEnvironmentProviderRemoveContext",
+        "experimental_useBranches",
+        "experimental_useCheckoutState",
+      ]),
+    );
+    expect(environmentProviders?.firstParty).toContain("Project checkout");
+
+    const eventCopy = SURFACES_BY_ID.get("thread-events")?.bullets.join(" ");
+    expect(eventCopy).toContain("unarchived");
+    expect(eventCopy).toContain("cancelled before dispatch");
+  });
+
+  it("maps bootstrap and checkpointed allocation to the machine surface", () => {
+    const machines = SURFACES_BY_ID.get("machine-providers");
+    expect(machines?.apiSymbols).toEqual(
+      expect.arrayContaining([
+        "MachineExecutorRequest",
+        "MachineExecutor",
+        "MachineBootstrapRequest",
+        "MachineBootstrapApi",
+        "PluginMachineProviderCreateContext",
+        "PluginMachineProviderLifecycleContext",
+        "PluginMachineProviderResource",
+        "PluginMachineProviderInputsProps",
+        "PluginMachineProviderInputsChange",
+        "PluginMachineProviderInputsRegistration",
+      ]),
+    );
+    expect(SURFACES_BY_ID.get("server-access")?.apiSymbols).toEqual(
+      expect.arrayContaining([
+        "PluginServerAccess",
+        "ServerAccessProviderDeclaration",
+        "ServerAccessGrant",
+      ]),
+    );
+  });
+
   it("follows the lead-then-bullets template", () => {
     for (const group of SURFACE_GROUPS) {
       for (const surface of group.surfaces) {

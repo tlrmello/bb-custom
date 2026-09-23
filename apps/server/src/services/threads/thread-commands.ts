@@ -24,8 +24,11 @@ import {
   LIVE_DAEMON_COMMAND_TIMEOUT_MS,
   startLiveHostCommand,
 } from "../hosts/live-command.js";
-import { getLastProviderThreadId } from "./thread-events.js";
-import type { ThreadForkDescriptor } from "./thread-provisioning-context.js";
+import {
+  getLastProviderThreadId,
+  requireDispatchableProviderThreadId,
+} from "./thread-events.js";
+import type { ThreadForkDescriptor } from "./thread-startup-store.js";
 import {
   resolveThreadRuntimeCommandConfig,
   type ResolvedThreadRuntimeCommandConfig,
@@ -275,7 +278,6 @@ export async function buildThreadStartCommand(
     threadId: args.thread.id,
     workspaceContext: workspaceContextFromPath({
       path: runtimeContext.workspacePath,
-      workspaceProvisionType: runtimeContext.workspaceProvisionType,
     }),
     projectId: args.projectId,
     providerId: args.providerId,
@@ -294,6 +296,7 @@ export async function buildThreadStartCommand(
     }),
     instructions: runtimeContext.instructions,
     dynamicTools: runtimeContext.dynamicTools,
+    contributedEnv: runtimeContext.contributedEnv,
     injectedSkillSources: runtimeContext.injectedSkillSources,
     instructionMode: runtimeContext.instructionMode,
     threadStoragePath: runtimeContext.threadStoragePath,
@@ -327,7 +330,6 @@ function buildPreparedTurnSubmitCommandPayload(
     resumeContext: {
       workspaceContext: workspaceContextFromPath({
         path: args.runtimeContext.workspacePath,
-        workspaceProvisionType: args.runtimeContext.workspaceProvisionType,
       }),
       projectId: args.runtimeContext.projectId,
       providerId: args.runtimeContext.providerId,
@@ -335,6 +337,7 @@ function buildPreparedTurnSubmitCommandPayload(
       providerThreadId: args.providerThreadId,
       instructions: args.runtimeContext.instructions,
       dynamicTools: args.runtimeContext.dynamicTools,
+      contributedEnv: args.runtimeContext.contributedEnv,
       injectedSkillSources: args.runtimeContext.injectedSkillSources,
       instructionMode: args.runtimeContext.instructionMode,
     },
@@ -356,7 +359,8 @@ export async function prepareTurnSubmitCommandPayload(
 ): Promise<PreparedTurnSubmitCommandPayload> {
   await deps.providerRegistry.whenRegistrationsSettled();
   const providerThreadId = requireProviderThreadId(
-    args.providerThreadId ?? getLastProviderThreadId(deps, args.thread.id),
+    args.providerThreadId ??
+      requireDispatchableProviderThreadId(deps, args.thread.id),
     args.thread.id,
   );
   const runtimeContext = await resolveThreadRuntimeCommandConfig(deps, {
@@ -511,7 +515,6 @@ export function dispatchArchivedThreadProviderArchiveCommand(
   }
   const workspaceContext = workspaceContextFromPath({
     path: environment.path,
-    workspaceProvisionType: environment.workspaceProvisionType,
   });
 
   const bridgeLaunch = resolveBridgeLaunchForProviderId(
@@ -596,6 +599,17 @@ export function buildThreadStopCommand(
     type: "thread.stop",
     environmentId: args.environmentId,
     intent: args.intent,
+    threadId: args.threadId,
+  };
+}
+
+export function buildThreadStorageDeleteCommand(args: {
+  environmentId: string;
+  threadId: string;
+}): Extract<HostDaemonCommand, { type: "thread.storage.delete" }> {
+  return {
+    type: "thread.storage.delete",
+    environmentId: args.environmentId,
     threadId: args.threadId,
   };
 }

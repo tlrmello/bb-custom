@@ -1,7 +1,13 @@
-import { jsonValueSchema } from "@bb/domain";
+import {
+  jsonValueSchema,
+  pluginCatalogCategoryIdSchema,
+  pluginMarketplaceCollectionIdSchema,
+  pluginMarketplaceCollectionPluginIdSchema,
+} from "@bb/domain";
 import { z } from "zod";
 
 export const pluginRuntimeStatusSchema = z.enum([
+  "starting",
   "running",
   "error",
   "incompatible",
@@ -24,7 +30,6 @@ export const pluginResolvedVersionSchema = z.object({
   version: z.string(),
   display: z.string(),
 });
-export type PluginResolvedVersion = z.infer<typeof pluginResolvedVersionSchema>;
 
 export const pluginUpdateCheckEntrySchema = z.object({
   id: z.string(),
@@ -96,7 +101,6 @@ export const pluginUpdateStateSchema = z.object({
     .object({ version: z.string(), at: z.number(), detail: z.string() })
     .optional(),
 });
-export type PluginUpdateState = z.infer<typeof pluginUpdateStateSchema>;
 
 export const pluginHandlerStatsSchema = z.object({
   count: z.number(),
@@ -162,6 +166,17 @@ export const installedPluginSchema = z.object({
   enabled: z.boolean(),
   description: z.string().nullable(),
   name: z.string().nullable(),
+  categoryId: pluginCatalogCategoryIdSchema.optional(),
+  category: z.string().optional(),
+  screenshots: z.array(z.string()),
+  collections: z.array(
+    z.object({
+      id: pluginMarketplaceCollectionIdSchema,
+      rank: z.number().int().nonnegative(),
+    }),
+  ),
+  publishedAt: z.iso.datetime({ offset: true }).optional(),
+  updatedAt: z.iso.datetime({ offset: true }).optional(),
   icon: z.string().nullable(),
   iconUrl: z.string().nullable(),
   status: pluginRuntimeStatusSchema,
@@ -208,7 +223,7 @@ export const ROOT_PLUGIN_SOURCE_SELECTION: PluginSourceSelection = {
   kind: "root",
 };
 
-export const pluginInstallSourceRequestSchema = z
+export const pluginInstallRequestSchema = z
   .object({
     source: z.string().min(1),
     selection: pluginSourceSelectionSchema.default(
@@ -234,15 +249,6 @@ export const pluginCatalogInstallRequestSchema = z
     confirmedSource: z.lazy(() => pluginCatalogResolvedSourceSchema).optional(),
   })
   .strict();
-
-export const pluginInstallRequestSchema = pluginInstallSourceRequestSchema;
-
-export const pluginMutationResponseSchema = z.object({
-  ok: z.literal(true),
-  plugin: installedPluginSchema,
-});
-
-export const pluginInstallResponseSchema = pluginMutationResponseSchema;
 
 export const pluginReloadResponseSchema = z.object({
   ok: z.literal(true),
@@ -273,6 +279,13 @@ export const pluginSettingDescriptorSchema = z.discriminatedUnion("type", [
       ...pluginSettingBaseSchema,
       type: z.literal("boolean"),
       default: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...pluginSettingBaseSchema,
+      type: z.literal("number"),
+      default: z.number().finite().optional(),
     })
     .strict(),
   z
@@ -331,9 +344,27 @@ export const pluginCatalogStatusResponseSchema = z.object({
 
 export const pluginCatalogAuthorSchema = z.object({
   name: z.string(),
+  github: z.string().nullable().default(null),
   url: z.string().nullable(),
 });
 export type PluginCatalogAuthor = z.infer<typeof pluginCatalogAuthorSchema>;
+
+export const pluginCatalogCollectionMembershipSchema = z.object({
+  id: pluginMarketplaceCollectionIdSchema,
+  rank: z.number().int().nonnegative(),
+});
+export type PluginCatalogCollectionMembership = z.infer<
+  typeof pluginCatalogCollectionMembershipSchema
+>;
+
+export const pluginCatalogCollectionSchema = z.object({
+  id: pluginMarketplaceCollectionIdSchema,
+  displayName: z.string(),
+  pluginIds: z.array(pluginMarketplaceCollectionPluginIdSchema),
+});
+export type PluginCatalogCollection = z.infer<
+  typeof pluginCatalogCollectionSchema
+>;
 
 export const pluginCatalogSearchResultSchema = z.object({
   entryId: z.string(),
@@ -343,7 +374,13 @@ export const pluginCatalogSearchResultSchema = z.object({
   icon: z.string().nullable(),
   iconUrl: z.string().nullable(),
   iconTinted: z.boolean().default(false),
-  category: z.string(),
+  categoryId: pluginCatalogCategoryIdSchema.optional(),
+  category: z.string().optional(),
+  screenshots: z.array(z.string()).default([]),
+  overview: z.string().optional(),
+  collections: z.array(pluginCatalogCollectionMembershipSchema).default([]),
+  publishedAt: z.iso.datetime({ offset: true }).optional(),
+  updatedAt: z.iso.datetime({ offset: true }).optional(),
   source: z.string(),
   repositoryUrl: z.string().nullable().default(null),
   marketplace: z.string(),
@@ -363,7 +400,11 @@ export type PluginCatalogSearchResult = z.infer<
 
 export const pluginCatalogSearchResponseSchema = z.object({
   results: z.array(pluginCatalogSearchResultSchema),
+  collections: z.array(pluginCatalogCollectionSchema),
 });
+export type PluginCatalogSearchResponse = z.infer<
+  typeof pluginCatalogSearchResponseSchema
+>;
 
 export const pluginCatalogResolvedSourceSchema = z.discriminatedUnion("kind", [
   z
@@ -434,9 +475,6 @@ export const pluginMarketplaceSourceKindSchema = z.enum([
   "git",
   "path",
 ]);
-export type PluginMarketplaceSourceKind = z.infer<
-  typeof pluginMarketplaceSourceKindSchema
->;
 
 export const pluginMarketplaceSchema = z.object({
   name: z.string(),
@@ -492,3 +530,27 @@ export type PluginMarketplaceRefreshResult = z.infer<
 export const pluginMarketplaceRefreshResponseSchema = z.object({
   results: z.array(pluginMarketplaceRefreshResultSchema),
 });
+
+export const pluginRpcDiscoveryQuerySchema = z.object({
+  pluginId: z.string().min(1).optional(),
+  method: z.string().min(1).optional(),
+});
+export type PluginRpcDiscoveryQuery = z.infer<
+  typeof pluginRpcDiscoveryQuerySchema
+>;
+
+export const publishedPluginRpcMethodSchema = z.object({
+  pluginId: z.string().min(1),
+  displayName: z.string().min(1),
+  method: z.string().min(1),
+  registrationDescription: z.string().nullable(),
+  methodDescription: z.string().nullable(),
+  inputSchema: z.record(z.string(), jsonValueSchema),
+  outputSchema: z.record(z.string(), jsonValueSchema),
+});
+export type PublishedPluginRpcMethod = z.infer<
+  typeof publishedPluginRpcMethodSchema
+>;
+export const pluginRpcDiscoveryResponseSchema = z.array(
+  publishedPluginRpcMethodSchema,
+);

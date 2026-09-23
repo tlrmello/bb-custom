@@ -50,7 +50,7 @@ interface ShowcaseHeroCarouselProps {
   scenes: ShowcaseScenes;
   copy: ShowcaseHeroCopy;
   composer: ShowcaseHeroComposerConfig;
-  rail?: readonly IconName[];
+  rail: readonly IconName[];
   initialIndex?: number;
   autoplay?: boolean;
   composerDisabled?: boolean;
@@ -208,8 +208,7 @@ export function ShowcaseHeroCarousel({
         {copy.description}
       </p>
 
-      {}
-      <div className="relative mt-5 grid w-full max-w-[58rem] grid-cols-1 grid-rows-1">
+      <div className="@container relative mt-5 grid w-full max-w-[58rem] grid-cols-1 grid-rows-1">
         <div
           className={cn(
             "relative [grid-area:1/1]",
@@ -250,7 +249,7 @@ export function ShowcaseHeroCarousel({
                 }
                 className={cn(
                   "bb-hero-chip absolute z-10 hidden max-w-[9rem] cursor-pointer items-center gap-1.5",
-                  "rounded-lg border px-2 py-1.5 text-2xs font-medium shadow-sm lg:flex",
+                  "rounded-lg border px-2 py-1.5 text-2xs font-medium shadow-sm @[50rem]:flex",
                   "transition-[opacity,transform,background-color,border-color] duration-500",
                   isActive ? "opacity-100" : "opacity-70 hover:opacity-100",
                 )}
@@ -269,7 +268,7 @@ export function ShowcaseHeroCarousel({
             badge={copy.frameBadge}
             rail={rail}
             reducedMotion={reducedMotion}
-            className="mx-auto h-[13rem] w-full max-w-[38rem] lg:w-[66%]"
+            className="mx-auto h-[13rem] w-full max-w-[38rem] @[50rem]:w-[66%]"
           />
         </div>
 
