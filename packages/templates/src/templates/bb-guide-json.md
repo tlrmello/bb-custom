@@ -32,7 +32,8 @@ reading fields.
 Shapes
 
 List commands do not share one wrapper. Most print a bare array; a few wrap it.
-Fields beyond those shown exist; these are the ones scripts use.
+Fields beyond those shown exist; these are the ones scripts use. The `--help` of
+the most-parsed commands ends with the same shape.
 
   bb status --json
     {project: {id, name} | null, thread: {id, status, title, parentThreadId, environment: {hostId, display} | null} | null, childThreads: [{id, status, title}] | null, pendingTodos, pluginsNeedingAttention: [{id, status}], dataDir}
@@ -44,7 +45,7 @@ Fields beyond those shown exist; these are the ones scripts use.
     {thread: {id, status, title, projectId, environmentId, parentThreadId, ...}, environment: {id, hostId, path, branchName, ...} | null, pendingTodos}    (thread fields are under .thread)
 
   bb thread log <id> --json
-    [{id, seq, type, createdAt, threadId, scope, data}]    (bare array of raw events, oldest first; page with --after-seq <seq>)
+    [{id, seq, type, createdAt, threadId, scope, data}]    (bare array of raw events, oldest first; page with --after-seq <seq>); with --message: {message, before, after} of conversation rows
 
   bb thread output <id> --json
     {output}
@@ -63,6 +64,9 @@ Fields beyond those shown exist; these are the ones scripts use.
 
   bb thread search <query> --json
     {active: {total, results}, archived: {total, results}}
+
+  bb prompt-history list --json
+    {entries: [{id, createdAt, input, projectId, threadId, scope}], nextCursor: string | null}
 
   bb thread section list --json
     [{id, name, createdAt, updatedAt}]
@@ -83,7 +87,7 @@ Fields beyond those shown exist; these are the ones scripts use.
     [{id, displayName, available, capabilities, reasoningLevels, serviceTiers}]    (bare array)
 
   bb provider models [providerId] --json
-    [{id, model, displayName, supportedReasoningEfforts, defaultReasoningEffort, isDefault}]    (bare array)
+    [{id, model, displayName, supportedReasoningEfforts, defaultReasoningEffort, supportedServiceTiers?, isDefault}]    (bare array)
 
   bb environment list --json
     [{id, name, projectId, hostId, path, branchName, status, lifecycle}]    (bare array)

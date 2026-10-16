@@ -56,6 +56,7 @@ export function threadListEntry(
     originKind: null,
     originPluginId: null,
     visibility: "visible",
+    parentNotifications: "auto",
     archivedAt: null,
     pinnedAt: null,
     deletedAt: null,
@@ -63,10 +64,7 @@ export function threadListEntry(
     latestAttentionAt: updatedAt,
     createdAt: seedStartedAt(seed, now),
     updatedAt,
-    runtime: {
-      displayStatus: busy ? "active" : "idle",
-      hostReconnectGraceExpiresAt: null,
-    },
+    runtime: { displayStatus: busy ? "active" : "idle" },
     activity: {
       activeWorkflowCount: 0,
       activeBackgroundAgentCount: 0,
@@ -108,6 +106,7 @@ export function threadResponse(
   return {
     ...thread,
     activeBackgroundAgentCount: 0,
+    canRestoreEnvironment: false,
     canSpawnChild: true,
     queuedMessageCount: 0,
   };
@@ -189,6 +188,8 @@ export const EMPTY_TABS: ThreadTabsResponse = { revision: 0, tabs: [] };
 export const SYSTEM_VERSION: SystemVersionResponse = {
   currentVersion: "0.39.0",
   latestVersion: "0.39.0",
+  currentCommit: null,
+  installKind: "npm",
   source: "npm",
   updateAvailable: false,
   isDevelopment: false,
@@ -217,6 +218,7 @@ export function queuedMessage(args: {
     serviceTier: THREAD_DEFAULT_EXECUTION_OPTIONS.serviceTier,
     groupWithNext: false,
     sendAt: null,
+    state: "queued",
     waitingOn: null,
     failureReason: null,
     payload: { kind: "inline" },

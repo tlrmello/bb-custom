@@ -9,15 +9,19 @@ import {
   useState,
 } from "react";
 import type { ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { useStore } from "jotai";
 import { cn } from "@bb/shared-ui/lib/utils";
 import { usePointerCoarse } from "@bb/shared-ui/hooks/use-pointer-coarse";
 import { PAGE_SHELL_CONTENT_STYLE } from "./page-shell-content-style.js";
 import { supportsScrollAnchoring } from "@/lib/scroll-anchoring-support";
+import { PAGE_SCROLL_TO_TOP_EVENT } from "@/lib/page-scroll-to-top";
 import {
   threadTimelineScrollAnchorAtomFamily,
   type ScrollAnchor,
 } from "@/lib/thread-timeline-scroll-anchor.js";
+import { layoutAnimationInFlightCountAtom } from "./layoutAnimationAtoms.js";
+import { TitleBarScrollFade } from "./title-bar-scroll-fade.js";
 
 export interface BottomAnchorContextValue {
   getScrollElement: () => HTMLElement | null;
@@ -28,6 +32,7 @@ export interface BottomAnchorContextValue {
     args: ScrollElementIntoViewClampedToMaxScrollArgs,
   ) => void;
   captureScrollAnchor: () => void;
+  holdContentPosition: (args: HoldContentPositionArgs) => void;
 }
 
 interface BottomAnchoredScrollBodyProps {
@@ -49,6 +54,12 @@ interface ScrollElementIntoViewClampedToMaxScrollArgs {
   element: HTMLElement;
 }
 
+interface HoldContentPositionArgs {
+  edge: "top" | "bottom";
+  element: HTMLElement;
+  update: () => void;
+}
+
 interface ElementVisibilityArgs {
   element: HTMLElement;
   scrollArea: HTMLElement;
@@ -61,6 +72,7 @@ const BOTTOM_RESTORE_SETTLE_FRAME_COUNT = 3;
 const SCROLL_ANCHOR_CAPTURE_THROTTLE_MS = 100;
 const COARSE_SCROLL_ANCHOR_CAPTURE_THROTTLE_MS = 250;
 const SCROLL_ANCHOR_RESTORE_MAX_ATTEMPTS = 8;
+const CONTENT_POSITION_HOLD_MS = 250;
 const TIMELINE_ROW_ID_SELECTOR = "[data-timeline-row-id]";
 const TOP_LEVEL_TIMELINE_ROW_LIST_SELECTOR =
   '[data-timeline-row-list="top-level"]';
@@ -68,7 +80,7 @@ const TIMELINE_VIRTUAL_SPACER_SELECTOR =
   ":scope > [data-timeline-virtual-spacer]";
 const DIRECT_TIMELINE_ROW_SELECTOR = [
   `:scope > ${TIMELINE_ROW_ID_SELECTOR}`,
-  `${TIMELINE_VIRTUAL_SPACER_SELECTOR} > ${TIMELINE_ROW_ID_SELECTOR}`,
+  `:scope > [data-timeline-items] > ${TIMELINE_ROW_ID_SELECTOR}`,
 ].join(", ");
 const SCROLL_INTENT_KEYS = new Set([
   "ArrowDown",
@@ -97,18 +109,6 @@ function getMaxScrollOffset(element: HTMLElement) {
 
 function isScrolledNearBottom(maxScrollOffset: number, scrollTop: number) {
   return maxScrollOffset - scrollTop <= BOTTOM_ANCHOR_THRESHOLD_PX;
-}
-
-function isElementFullyVisibleInScrollArea({
-  element,
-  scrollArea,
-}: ElementVisibilityArgs) {
-  const elementRect = element.getBoundingClientRect();
-  const scrollAreaRect = scrollArea.getBoundingClientRect();
-  return (
-    elementRect.top >= scrollAreaRect.top &&
-    elementRect.bottom <= scrollAreaRect.bottom
-  );
 }
 
 function getScrollOffsetToRevealElement({
@@ -235,6 +235,7 @@ export function BottomAnchoredScrollBody({
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const scrollContentRef = useRef<HTMLDivElement>(null);
   const shouldStickToBottomRef = useRef(true);
+  const scrollToTopInProgressRef = useRef(false);
   const userScrollIntentUntilRef = useRef(0);
   const userScrollInputPendingRef = useRef(false);
   const pointerScrollIntentRef = useRef(false);
@@ -250,6 +251,8 @@ export function BottomAnchoredScrollBody({
     attemptsRemaining: number;
     lastAppliedScrollTop: number | null;
   } | null>(null);
+  const contentPositionHoldUntilRef = useRef(0);
+  const activeContentPositionHoldsRef = useRef(0);
   const scrollAnchorCaptureThrottleRef = useRef<{
     lastWriteAt: number;
     trailingTimeout: number | null;
@@ -294,6 +297,7 @@ export function BottomAnchoredScrollBody({
   }, []);
 
   const cancelQueuedRestore = useCallback(() => {
+    scrollToTopInProgressRef.current = false;
     if (restoreFrameRef.current === null) return;
     window.cancelAnimationFrame(restoreFrameRef.current);
     restoreFrameRef.current = null;
@@ -354,6 +358,7 @@ export function BottomAnchoredScrollBody({
 
   const scrollToBottom = useCallback(() => {
     const scrollArea = scrollAreaRef.current;
+    scrollToTopInProgressRef.current = false;
     cancelPendingScrollRestore();
     userScrollIntentUntilRef.current = 0;
     pointerScrollIntentRef.current = false;
@@ -369,18 +374,18 @@ export function BottomAnchoredScrollBody({
   const scrollElementIntoView = useCallback(
     ({ element, options }: ScrollElementIntoViewArgs) => {
       const scrollArea = scrollAreaRef.current;
-      if (
-        scrollArea &&
-        isElementFullyVisibleInScrollArea({ element, scrollArea })
-      ) {
-        return;
-      }
+      cancelPendingScrollRestore();
+      pendingPrependAnchorRef.current = null;
       shouldStickToBottomRef.current = false;
       setIsAtBottom(false);
       cancelQueuedRestore();
+      const previousScrollTop = scrollArea?.scrollTop;
       element.scrollIntoView(options);
+      if (scrollArea && scrollArea.scrollTop !== previousScrollTop) {
+        scrollArea.dispatchEvent(new Event("scroll"));
+      }
     },
-    [cancelQueuedRestore],
+    [cancelPendingScrollRestore, cancelQueuedRestore],
   );
 
   const scrollElementIntoViewClampedToMaxScroll = useCallback(
@@ -423,6 +428,47 @@ export function BottomAnchoredScrollBody({
       scrollTop: scrollArea.scrollTop,
     };
   }, []);
+
+  const holdContentPosition = useCallback(
+    ({ edge, element, update }: HoldContentPositionArgs) => {
+      const scrollArea = scrollAreaRef.current;
+      if (!scrollArea) {
+        update();
+        return;
+      }
+      const edgeBefore = element.getBoundingClientRect()[edge];
+      cancelQueuedRestore();
+      cancelPendingScrollRestore();
+      shouldStickToBottomRef.current = false;
+      contentPositionHoldUntilRef.current =
+        window.performance.now() + CONTENT_POSITION_HOLD_MS;
+      store.set(layoutAnimationInFlightCountAtom, (count) => count + 1);
+      activeContentPositionHoldsRef.current += 1;
+      scrollArea.style.overflowAnchor = "none";
+      window.setTimeout(() => {
+        store.set(layoutAnimationInFlightCountAtom, (count) =>
+          Math.max(0, count - 1),
+        );
+        activeContentPositionHoldsRef.current -= 1;
+        if (activeContentPositionHoldsRef.current === 0) {
+          const scrollTop = scrollArea.scrollTop;
+          scrollArea.style.overflowAnchor = "";
+          scrollArea.scrollTop = scrollTop > 0 ? scrollTop - 1 : scrollTop + 1;
+          scrollArea.scrollTop = scrollTop;
+        }
+      }, CONTENT_POSITION_HOLD_MS);
+      flushSync(() => {
+        setIsAtBottom(false);
+        update();
+      });
+      if (!element.isConnected) return;
+      const drift = element.getBoundingClientRect()[edge] - edgeBefore;
+      if (Math.abs(drift) >= 0.5) {
+        scrollArea.scrollTop += drift;
+      }
+    },
+    [cancelPendingScrollRestore, cancelQueuedRestore, store],
+  );
 
   useLayoutEffect(() => {
     const scrollArea = scrollAreaRef.current;
@@ -475,7 +521,7 @@ export function BottomAnchoredScrollBody({
       const recentUserIntent = hasRecentUserScrollIntent();
       const anchorAtom =
         threadTimelineScrollAnchorAtomFamily(scrollAnchorThreadId);
-      if (atBottomByGeometry) {
+      if (atBottomByGeometry && !scrollToTopInProgressRef.current) {
         userDetachedFromBottomRef.current = false;
         store.set(anchorAtom, {
           rowId: "",
@@ -565,14 +611,44 @@ export function BottomAnchoredScrollBody({
   );
 
   const markUserScrollIntent = useCallback(() => {
+    scrollToTopInProgressRef.current = false;
+    contentPositionHoldUntilRef.current = 0;
     userScrollInputPendingRef.current = true;
     userScrollIntentUntilRef.current =
       window.performance.now() + USER_SCROLL_INTENT_MS;
   }, []);
 
+  useEffect(() => {
+    const scrollArea = scrollAreaRef.current;
+    if (!scrollArea) return;
+    const scrollToTop = (event: Event) => {
+      event.preventDefault();
+      if (refreshMaxScrollOffset(scrollArea) === 0) return;
+      markUserScrollIntent();
+      userDetachedFromBottomRef.current = true;
+      shouldStickToBottomRef.current = false;
+      setIsAtBottom(false);
+      cancelQueuedRestore();
+      pendingScrollRestoreRef.current = null;
+      pendingPrependAnchorRef.current = null;
+      scrollToTopInProgressRef.current = scrollArea.scrollTop > 0;
+      scrollArea.scrollTo({
+        top: 0,
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "instant"
+          : "smooth",
+      });
+    };
+    scrollArea.addEventListener(PAGE_SCROLL_TO_TOP_EVENT, scrollToTop);
+    return () => {
+      scrollArea.removeEventListener(PAGE_SCROLL_TO_TOP_EVENT, scrollToTop);
+    };
+  }, [cancelQueuedRestore, markUserScrollIntent, refreshMaxScrollOffset]);
+
   const markWheelScrollIntent = useCallback(
     (event: WheelEvent) => {
       const scrollArea = scrollAreaRef.current;
+      scrollToTopInProgressRef.current = false;
       if (event.deltaY > 0 && scrollArea) {
         const nearBottom =
           isScrolledNearBottom(
@@ -603,6 +679,7 @@ export function BottomAnchoredScrollBody({
   }, [markUserScrollIntent]);
 
   const startPointerScrollIntent = useCallback(() => {
+    scrollToTopInProgressRef.current = false;
     pointerScrollIntentRef.current = true;
   }, []);
 
@@ -631,12 +708,38 @@ export function BottomAnchoredScrollBody({
     pendingScrollRestoreRef.current = null;
   }, []);
 
+  const settleContentPositionHold = useCallback((): boolean => {
+    const scrollArea = scrollAreaRef.current;
+    if (
+      !scrollArea ||
+      shouldStickToBottomRef.current ||
+      window.performance.now() > contentPositionHoldUntilRef.current
+    ) {
+      contentPositionHoldUntilRef.current = 0;
+      return false;
+    }
+    if (
+      isScrolledNearBottom(maxScrollOffsetRef.current, scrollArea.scrollTop)
+    ) {
+      contentPositionHoldUntilRef.current = 0;
+      attachToBottom();
+      return false;
+    }
+    userDetachedFromBottomRef.current = true;
+    return true;
+  }, [attachToBottom]);
+
   const syncBottomStateFromScroll = useCallback(() => {
     const scrollArea = scrollAreaRef.current;
     if (!scrollArea) return;
     const hasDirectUserScrollInput =
       userScrollInputPendingRef.current || pointerScrollIntentRef.current;
     userScrollInputPendingRef.current = false;
+
+    if (scrollToTopInProgressRef.current) {
+      if (scrollArea.scrollTop <= 0) scrollToTopInProgressRef.current = false;
+      return;
+    }
 
     if (
       pendingPrependAnchorRef.current !== null &&
@@ -754,6 +857,7 @@ export function BottomAnchoredScrollBody({
           maxScrollOffset < previousMaxScrollOffset &&
           isScrolledNearBottom(maxScrollOffset, scrollArea.scrollTop);
       }
+      if (settleContentPositionHold()) return;
       if (advancePendingScrollRestore()) return;
       if (shrankOntoBottomWhileDetached && scrollArea) {
         attachToBottom();
@@ -766,6 +870,7 @@ export function BottomAnchoredScrollBody({
       attachToBottom,
       queueBottomRestore,
       refreshMaxScrollOffset,
+      settleContentPositionHold,
       writeScrollAnchor,
     ],
   );
@@ -794,6 +899,7 @@ export function BottomAnchoredScrollBody({
       scrollElementIntoView,
       scrollElementIntoViewClampedToMaxScroll,
       captureScrollAnchor,
+      holdContentPosition,
     }),
     [
       getScrollElement,
@@ -802,6 +908,7 @@ export function BottomAnchoredScrollBody({
       scrollElementIntoView,
       scrollElementIntoViewClampedToMaxScroll,
       captureScrollAnchor,
+      holdContentPosition,
     ],
   );
 
@@ -909,9 +1016,11 @@ export function BottomAnchoredScrollBody({
       <TimelineScrollRestoreRowIdContext.Provider
         value={initialScrollRestoreRowId}
       >
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(auto,1fr)] overflow-hidden">
+        <div className="relative grid min-h-0 flex-1 grid-rows-[minmax(auto,1fr)] overflow-hidden">
+          <TitleBarScrollFade tone="background" />
           <div
             ref={scrollAreaRef}
+            data-page-scroll-viewport=""
             className={cn(
               "thread-scrollbar @container/page col-start-1 row-start-1 min-h-0 overflow-x-hidden overflow-y-auto",
               scrollAreaClassName,

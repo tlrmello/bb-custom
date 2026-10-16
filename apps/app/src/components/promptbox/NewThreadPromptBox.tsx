@@ -18,6 +18,7 @@ import type { ComposerTextEffectSource } from "@/lib/composer-text-effects";
 import { ComposerBannersSlot } from "@/components/plugin/PluginComposerBanners";
 import { PROMPT_STACK_TRACK_CLASS } from "@/components/promptbox/banner/PromptStackCard";
 import {
+  composerScopeIdentity,
   type PluginComposerHost,
   usePluginComposerViewModel,
 } from "@/components/plugin/plugin-composer-host";
@@ -42,7 +43,6 @@ import {
 } from "@/components/promptbox/PromptBoxInternal";
 import { usePromptModePermissionDisplay } from "@/components/promptbox/usePromptModePermissionDisplay";
 import { usePromptVoice } from "@/components/promptbox/usePromptVoice";
-import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";
 import {
   EnvironmentPickerUI,
   type EnvironmentPickerMachines,
@@ -85,7 +85,6 @@ export interface NewThreadEnvironmentConfig {
   machineProviders?: readonly SystemMachineProvider[];
   selectedProviderHostId?: string | null;
   inputsControlProviderIds?: ReadonlySet<string>;
-  multiMachinePickerEnabled?: boolean;
   onSelectProvider?: EnvironmentPickerUIProps["onSelectProvider"];
   onSelectHost?: EnvironmentPickerUIProps["onSelectHost"];
   onSelectReuse?: EnvironmentPickerUIProps["onSelectReuse"];
@@ -113,6 +112,7 @@ export interface NewThreadModeConfig {
   environment: NewThreadEnvironmentConfig;
   worktree: NewThreadWorktreeConfig;
   permission: ExecutionPermissionConfig;
+  sessionOptionsControl?: ReactNode;
   environmentProviderInputsSlot?: ReactNode;
   machineProviderInputsSlot?: ReactNode;
   banner?: ReactNode;
@@ -131,7 +131,6 @@ interface NewThreadPromptBoxUIProps {
   disabled: boolean;
   disabledReason?: string;
   autoFocus?: boolean;
-  allowSoftKeyboardAutoFocus?: boolean;
   pluginComposerHost?: PluginComposerHost | null;
   textEffects?: readonly ComposerTextEffectSource[];
   placeholder?: string;
@@ -165,7 +164,6 @@ export const NewThreadPromptBoxUI = memo(function NewThreadPromptBoxUI({
   disabled,
   disabledReason,
   autoFocus,
-  allowSoftKeyboardAutoFocus,
   pluginComposerHost,
   textEffects,
   placeholder: placeholderOverride,
@@ -183,12 +181,15 @@ export const NewThreadPromptBoxUI = memo(function NewThreadPromptBoxUI({
     if (focusRequest === undefined) return;
     promptBoxRef.current?.focusEnd();
   }, [focusRequest]);
-  const isFocusedPane = useOptionalPaneContext()?.isFocused ?? true;
   const focusDefault = useCallback(() => {
     promptBoxRef.current?.focusEnd();
     return promptBoxRef.current !== null;
   }, []);
-  const voice = usePromptVoice(promptBoxRef);
+  const voice = usePromptVoice(
+    promptBoxRef,
+    pluginComposerHost ?? undefined,
+    pluginComposerHost ? composerScopeIdentity(pluginComposerHost.scope) : null,
+  );
   const attachmentCount = attachments.items?.length ?? 0;
   const [composerLayout, setComposerLayout] =
     useState<ComposerView["layout"]>("expanded");
@@ -203,8 +204,6 @@ export const NewThreadPromptBoxUI = memo(function NewThreadPromptBoxUI({
   const controller = useComposerExtensionController({
     host: pluginComposerHost ?? null,
     view: composerView,
-    isFocused: isFocusedPane,
-    isPrimary: true,
     focusDefault,
   });
 
@@ -223,7 +222,6 @@ export const NewThreadPromptBoxUI = memo(function NewThreadPromptBoxUI({
           disabled={disabled}
           disabledReason={disabledReason}
           autoFocus={autoFocus}
-          allowSoftKeyboardAutoFocus={allowSoftKeyboardAutoFocus}
           textEffects={textEffects}
           placeholder={placeholderOverride}
           history={history}
@@ -236,6 +234,7 @@ export const NewThreadPromptBoxUI = memo(function NewThreadPromptBoxUI({
           execution={execution}
           voice={voice}
           onComposerLayoutChange={setComposerLayout}
+          onFocusCommand={controller.focus}
         />
       }
     />
@@ -249,6 +248,7 @@ interface DefaultNewThreadComposerProps extends Omit<
   promptBoxRef: RefObject<PromptBoxHandle | null>;
   voice: ReturnType<typeof usePromptVoice>;
   onComposerLayoutChange: (layout: ComposerView["layout"]) => void;
+  onFocusCommand: () => void;
 }
 
 const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
@@ -262,7 +262,6 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
   disabled,
   disabledReason,
   autoFocus,
-  allowSoftKeyboardAutoFocus,
   textEffects,
   placeholder: placeholderOverride,
   history,
@@ -275,6 +274,7 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
   execution,
   voice,
   onComposerLayoutChange,
+  onFocusCommand,
 }: DefaultNewThreadComposerProps) {
   const isProjectlessPrompt = project?.value === null;
   const placeholder =
@@ -300,7 +300,7 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
       className="w-full"
     >
       <div
-        className={`mb-2 grid gap-2 empty:hidden ${PROMPT_STACK_TRACK_CLASS}`}
+        className={`mb-2 hidden gap-2 has-[>:not(:empty)]:grid ${PROMPT_STACK_TRACK_CLASS}`}
       >
         <ComposerBannersSlot ownerPlacement="before">
           {modeConfig.banner}
@@ -328,14 +328,17 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
           title: submitTitle,
         }}
         autoFocus={autoFocus}
-        allowSoftKeyboardAutoFocus={allowSoftKeyboardAutoFocus}
+        onFocusCommand={onFocusCommand}
         editorLayout="root-compose"
         minHeight={NEW_THREAD_PROMPT_BOX_MIN_HEIGHT}
         placeholder={placeholder}
         header={modeConfig.header}
         footerStart={<ExecutionControls {...execution} />}
       />
-      <div className="mt-1 flex select-none items-center justify-between gap-2 px-3.5">
+      <div
+        data-new-thread-footer=""
+        className="mt-1 flex select-none items-center justify-between gap-2 px-3.5 max-md:mt-0 max-md:gap-1 max-md:px-1"
+      >
         <div className="flex min-w-0 flex-1 items-center gap-1">
           {project ? (
             <ProjectSelector
@@ -361,6 +364,7 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
           />
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {modeConfig.sessionOptionsControl}
           <PermissionModePicker
             value={modeConfig.permission.value}
             options={modeConfig.permission.options}
@@ -437,7 +441,6 @@ export function EnvironmentSlot({
         providersByHostId={environment.providersByHostId}
         selectedProviderHostId={environment.selectedProviderHostId}
         inputsControlProviderIds={environment.inputsControlProviderIds}
-        multiMachinePickerEnabled={environment.multiMachinePickerEnabled}
         onSelectProvider={environment.onSelectProvider}
         onSelectHost={environment.onSelectHost}
         onSelectReuse={environment.onSelectReuse}
@@ -527,14 +530,13 @@ export function ProjectlessMachineSlot({
       className="shrink-0"
       muted
       machineProviders={environment.machineProviders}
-      multiMachinePickerEnabled={environment.multiMachinePickerEnabled}
     />
   );
 }
 
 type NewThreadConnectedEnvironmentConfig = Omit<
   NewThreadEnvironmentConfig,
-  "host" | "isLocal" | "machines" | "multiMachinePickerEnabled"
+  "host" | "isLocal" | "machines"
 >;
 
 type NewThreadConnectedModeConfig = Omit<NewThreadModeConfig, "environment"> & {
@@ -556,8 +558,6 @@ export function NewThreadPromptBox({
   const systemConfigQuery = useSystemConfig();
   const { providers: machineProviders } = useSystemMachineProviders();
   const primaryHostId = systemConfigQuery.data?.primaryHostId ?? null;
-  const multiMachinePickerEnabled =
-    systemConfigQuery.data?.experiments.multiMachinePicker ?? false;
   const availableHosts = useMemo(
     () => selectHosts(hosts, "persistent"),
     [hosts],
@@ -597,7 +597,6 @@ export function NewThreadPromptBox({
       host: selectedHost,
       isLocal: isLocalHost,
       machines,
-      multiMachinePickerEnabled,
     }),
     [
       threadConfig.environment,
@@ -605,7 +604,6 @@ export function NewThreadPromptBox({
       selectedHost,
       isLocalHost,
       machines,
-      multiMachinePickerEnabled,
     ],
   );
   return (

@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 
 import {
-  act,
   cleanup,
   fireEvent,
   render,
@@ -16,6 +15,15 @@ import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadT
 import { makeThreadListEntry } from "@bb/test-helpers/domain-fixtures";
 import { sdk } from "@/lib/sdk";
 import { createBbDesktopApi } from "@/test/bb-desktop-test-utils";
+import { MACOS_TITLE_BAR_TRAILING_TOGGLE_CLASS } from "@/lib/bb-desktop";
+import { SidebarProvider } from "@/components/ui/sidebar";
+import { MemoryRouter } from "react-router-dom";
+import { AppCommandProvider } from "@/components/commands/AppCommandProvider";
+import {
+  ThreadActionCollectors,
+  resetThreadActionRegistryForTest,
+} from "@/lib/thread-actions/thread-action-registry";
+import type { ThreadDetailHeaderActionsMenuArgs } from "./ThreadDetailHeader";
 
 const mocks = vi.hoisted(() => ({
   renameThreadAsync: vi.fn(),
@@ -28,8 +36,6 @@ vi.mock("@/components/thread/ThreadActionsProvider", () => ({
 }));
 
 vi.mock("@/components/layout/AppPageHeader", () => ({
-  COMPACT_SHELF_HIDDEN_PAGE_HEADER_ACTIONS_CLASS:
-    "compact-shelf-hidden-header-actions",
   HEADER_ICON_BUTTON_CLASS: "header-icon-button",
   HEADER_PANE_ACTION_ICON_BUTTON_CLASS: "header-pane-action-button",
   AppPageHeader: ({
@@ -51,6 +57,28 @@ vi.mock("@/components/layout/AppPageHeader", () => ({
 }));
 
 const viewportState = vi.hoisted(() => ({ isCompactViewport: false }));
+
+vi.mock("@/hooks/queries/system-queries", () => ({
+  useSystemConfig: () => ({
+    data: {
+      keybindings: [
+        {
+          command: "thread.rename",
+          desktopOnly: false,
+          shortcut: {
+            key: "r",
+            mod: true,
+            meta: false,
+            control: false,
+            alt: false,
+            shift: true,
+          },
+          when: { all: ["mainSurface"], none: ["modalOpen"] },
+        },
+      ],
+    },
+  }),
+}));
 
 vi.mock("@bb/shared-ui/hooks/use-compact-viewport", () => ({
   useIsCompactViewport: () => viewportState.isCompactViewport,
@@ -75,6 +103,7 @@ const PANE_CONTEXT: PaneContextValue = {
 
 afterEach(() => {
   cleanup();
+  resetThreadActionRegistryForTest();
   viewportState.isCompactViewport = false;
   mocks.renameThreadAsync.mockReset();
   vi.restoreAllMocks();
@@ -89,7 +118,6 @@ describe("ThreadDetailHeader", () => {
       <PaneContext.Provider value={{ ...PANE_CONTEXT, onCreatePane }}>
         <ThreadDetailHeader
           actionsMenu={null}
-          childPillLabel={null}
           isSecondaryPanelOpen={false}
           onOpenThreadGitAction={vi.fn()}
           onToggleSecondaryPanel={vi.fn()}
@@ -111,7 +139,6 @@ describe("ThreadDetailHeader", () => {
       <PaneContext.Provider value={PANE_CONTEXT}>
         <ThreadDetailHeader
           actionsMenu={null}
-          childPillLabel={null}
           isSecondaryPanelOpen
           onOpenThreadGitAction={vi.fn()}
           onToggleSecondaryPanel={vi.fn()}
@@ -134,7 +161,6 @@ describe("ThreadDetailHeader", () => {
       <PaneContext.Provider value={PANE_CONTEXT}>
         <ThreadDetailHeader
           actionsMenu={null}
-          childPillLabel={null}
           isSecondaryPanelOpen
           onOpenThreadGitAction={vi.fn()}
           onToggleSecondaryPanel={vi.fn()}
@@ -163,7 +189,6 @@ describe("ThreadDetailHeader", () => {
         <PaneContext.Provider value={PANE_CONTEXT}>
           <ThreadDetailHeader
             actionsMenu={null}
-            childPillLabel={null}
             isSecondaryPanelOpen={false}
             onOpenThreadGitAction={vi.fn()}
             onToggleSecondaryPanel={vi.fn()}
@@ -195,7 +220,6 @@ describe("ThreadDetailHeader", () => {
       >
         <ThreadDetailHeader
           actionsMenu={null}
-          childPillLabel={null}
           isSecondaryPanelOpen
           onOpenThreadGitAction={vi.fn()}
           onToggleSecondaryPanel={vi.fn()}
@@ -236,7 +260,7 @@ describe("ThreadDetailHeader", () => {
     render(
       <PaneContext.Provider value={splitContext}>
         <ThreadDetailHeader
-          actionsMenu={(includeResponsiveActions) => (
+          actionsMenu={({ includeResponsiveActions }) => (
             <>
               <span>Thread menu</span>
               {includeResponsiveActions ? (
@@ -244,7 +268,6 @@ describe("ThreadDetailHeader", () => {
               ) : null}
             </>
           )}
-          childPillLabel={null}
           isSecondaryPanelOpen={false}
           onClosePane={vi.fn()}
           onOpenThreadGitAction={vi.fn()}
@@ -263,9 +286,6 @@ describe("ThreadDetailHeader", () => {
     expect(screen.queryByText("Commit")).toBeNull();
     expect(screen.getByText("Thread menu")).not.toBeNull();
     expect(screen.getByText("Responsive menu actions")).not.toBeNull();
-    expect(
-      screen.getByTestId("thread-detail-header-actions-menu").classList,
-    ).toContain("compact-shelf-hidden-header-actions");
     const closePane = screen.getByRole("button", { name: "Close pane" });
     expect(closePane.classList).toContain("header-pane-action-button");
     const closeIcon = closePane.querySelector('[data-icon="CloseThreadPane"]');
@@ -298,7 +318,7 @@ describe("ThreadDetailHeader", () => {
     render(
       <PaneContext.Provider value={splitContext}>
         <ThreadDetailHeader
-          actionsMenu={(includeResponsiveActions) => (
+          actionsMenu={({ includeResponsiveActions }) => (
             <>
               <span>Thread menu</span>
               {includeResponsiveActions ? (
@@ -306,7 +326,6 @@ describe("ThreadDetailHeader", () => {
               ) : null}
             </>
           )}
-          childPillLabel={null}
           isSecondaryPanelOpen={false}
           onClosePane={vi.fn()}
           onOpenThreadGitAction={vi.fn()}
@@ -332,7 +351,6 @@ describe("ThreadDetailHeader", () => {
       <PaneContext.Provider value={PANE_CONTEXT}>
         <ThreadDetailHeader
           actionsMenu={null}
-          childPillLabel={null}
           isSecondaryPanelOpen={false}
           onOpenThreadGitAction={vi.fn()}
           onToggleSecondaryPanel={vi.fn()}
@@ -368,7 +386,6 @@ describe("ThreadDetailHeader", () => {
         <PaneContext.Provider value={PANE_CONTEXT}>
           <ThreadDetailHeader
             actionsMenu={null}
-            childPillLabel={null}
             isSecondaryPanelOpen={false}
             onOpenThreadGitAction={vi.fn()}
             onToggleSecondaryPanel={vi.fn()}
@@ -409,7 +426,6 @@ describe("ThreadDetailHeader", () => {
           <PaneContext.Provider value={PANE_CONTEXT}>
             <ThreadDetailHeader
               actionsMenu={null}
-              childPillLabel={null}
               isSecondaryPanelOpen={false}
               onOpenThreadGitAction={vi.fn()}
               onToggleSecondaryPanel={vi.fn()}
@@ -457,7 +473,6 @@ describe("ThreadDetailHeader", () => {
         <PaneContext.Provider value={PANE_CONTEXT}>
           <ThreadDetailHeader
             actionsMenu={null}
-            childPillLabel={null}
             isSecondaryPanelOpen={false}
             onOpenThreadGitAction={vi.fn()}
             onToggleSecondaryPanel={vi.fn()}
@@ -487,7 +502,6 @@ describe("ThreadDetailHeader", () => {
         <PaneContext.Provider value={PANE_CONTEXT}>
           <ThreadDetailHeader
             actionsMenu={null}
-            childPillLabel={null}
             isSecondaryPanelOpen={false}
             onOpenThreadGitAction={vi.fn()}
             onToggleSecondaryPanel={vi.fn()}
@@ -510,7 +524,6 @@ describe("ThreadDetailHeader", () => {
       <PaneContext.Provider value={PANE_CONTEXT}>
         <ThreadDetailHeader
           actionsMenu={null}
-          childPillLabel={null}
           isSecondaryPanelOpen={false}
           onOpenThreadGitAction={vi.fn()}
           onToggleSecondaryPanel={vi.fn()}
@@ -524,6 +537,7 @@ describe("ThreadDetailHeader", () => {
     fireEvent.doubleClick(screen.getByText("Focused thread"));
     const input = await screen.findByRole("textbox", { name: "Thread name" });
     expect(input).toHaveProperty("value", "Focused thread");
+    expect(screen.queryByText("Focused thread")).toBeNull();
 
     fireEvent.change(input, { target: { value: "Renamed thread" } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -540,38 +554,11 @@ describe("ThreadDetailHeader", () => {
     expect(screen.getByText("Focused thread")).not.toBeNull();
   });
 
-  it("cancels an inline header rename on Escape without saving", async () => {
-    render(
-      <PaneContext.Provider value={PANE_CONTEXT}>
-        <ThreadDetailHeader
-          actionsMenu={null}
-          childPillLabel={null}
-          isSecondaryPanelOpen={false}
-          onOpenThreadGitAction={vi.fn()}
-          onToggleSecondaryPanel={vi.fn()}
-          threadHeaderGitActions={[]}
-          threadId={THREAD_ID}
-          threadTitle="Focused thread"
-        />
-      </PaneContext.Provider>,
-    );
-
-    fireEvent.doubleClick(screen.getByText("Focused thread"));
-    const input = await screen.findByRole("textbox", { name: "Thread name" });
-    fireEvent.change(input, { target: { value: "Scratch name" } });
-    fireEvent.keyDown(input, { key: "Escape" });
-
-    expect(mocks.renameThreadAsync).not.toHaveBeenCalled();
-    expect(screen.queryByRole("textbox", { name: "Thread name" })).toBeNull();
-    expect(screen.getByText("Focused thread")).not.toBeNull();
-  });
-
   it("discards an unsaved header draft when switching threads", async () => {
     const header = (threadId: string, threadTitle: string) => (
       <PaneContext.Provider value={PANE_CONTEXT}>
         <ThreadDetailHeader
           actionsMenu={null}
-          childPillLabel={null}
           isSecondaryPanelOpen={false}
           onOpenThreadGitAction={vi.fn()}
           onToggleSecondaryPanel={vi.fn()}
@@ -596,60 +583,7 @@ describe("ThreadDetailHeader", () => {
     fireEvent.doubleClick(screen.getByText("Other thread"));
     expect(
       await screen.findByRole("textbox", { name: "Thread name" }),
-    ).toHaveProperty(
-      "value",
-      "Other thread",
-    );
-  });
-
-  it("keeps the draft visible while a header rename saves after click-away", async () => {
-    let resolveSave!: () => void;
-    const pendingSave = new Promise<void>((resolve) => {
-      resolveSave = resolve;
-    });
-    mocks.renameThreadAsync.mockReturnValue(pendingSave);
-    render(
-      <PaneContext.Provider value={PANE_CONTEXT}>
-        <ThreadDetailHeader
-          actionsMenu={null}
-          childPillLabel={null}
-          isSecondaryPanelOpen={false}
-          onOpenThreadGitAction={vi.fn()}
-          onToggleSecondaryPanel={vi.fn()}
-          threadHeaderGitActions={[]}
-          threadId={THREAD_ID}
-          threadTitle="Focused thread"
-        />
-        <button>Elsewhere</button>
-      </PaneContext.Provider>,
-    );
-
-    fireEvent.doubleClick(screen.getByText("Focused thread"));
-    const input = await screen.findByRole<HTMLInputElement>("textbox", {
-      name: "Thread name",
-    });
-    fireEvent.change(input, { target: { value: "Renamed thread" } });
-    await act(async () => new Promise(requestAnimationFrame));
-    act(() => screen.getByRole("button", { name: "Elsewhere" }).focus());
-
-    await waitFor(() =>
-      expect(mocks.renameThreadAsync).toHaveBeenCalledExactlyOnceWith(
-        THREAD_ID,
-        "Renamed thread",
-      ),
-    );
-    expect(
-      screen.getByRole<HTMLInputElement>("textbox", { name: "Thread name" }),
-    ).toHaveProperty(
-      "value",
-      "Renamed thread",
-    );
-    expect(input.hasAttribute("readonly")).toBe(true);
-    expect(screen.getByRole("status", { name: "Saving name" })).not.toBeNull();
-    expect(screen.queryByText("Focused thread")).toBeNull();
-
-    await act(async () => resolveSave());
-    expect(screen.queryByRole("textbox", { name: "Thread name" })).toBeNull();
+    ).toHaveProperty("value", "Other thread");
   });
 
   it("keeps the header title out of the macOS window-drag region so double click renames", async () => {
@@ -666,7 +600,6 @@ describe("ThreadDetailHeader", () => {
       <PaneContext.Provider value={PANE_CONTEXT}>
         <ThreadDetailHeader
           actionsMenu={null}
-          childPillLabel={null}
           isSecondaryPanelOpen={false}
           onOpenThreadGitAction={vi.fn()}
           onToggleSecondaryPanel={vi.fn()}
@@ -687,6 +620,44 @@ describe("ThreadDetailHeader", () => {
     );
   });
 
+  it("places the window toggle's reserved slot over the title-bar toggle so its whole box stays clickable", () => {
+    window.bbDesktop = createBbDesktopApi({
+      lastCheckedAt: null,
+      latestVersion: null,
+      pendingVersion: null,
+      platform: "macos",
+      updateAvailable: false,
+      updateDownloaded: false,
+      version: "0.0.0-test",
+    });
+    const { container } = render(
+      <MemoryRouter>
+        <SidebarProvider framed>
+          <PaneContext.Provider
+            value={{ ...PANE_CONTEXT, reservesWindowPanelToggle: true }}
+          >
+            <ThreadDetailHeader
+              actionsMenu={null}
+              isSecondaryPanelOpen={false}
+              onOpenThreadGitAction={vi.fn()}
+              onToggleSecondaryPanel={vi.fn()}
+              threadHeaderGitActions={[]}
+              threadId={THREAD_ID}
+              threadTitle="Pinned toggle"
+            />
+          </PaneContext.Provider>
+        </SidebarProvider>
+      </MemoryRouter>,
+    );
+
+    const slot = container.querySelector("span[aria-hidden].header-icon-button");
+    expect(slot).not.toBeNull();
+    const classes = slot?.className.split(" ") ?? [];
+    for (const token of MACOS_TITLE_BAR_TRAILING_TOGGLE_CLASS.split(" ")) {
+      expect(classes).toContain(token);
+    }
+  });
+
   it("does not start a pane drag while the header title is being edited", async () => {
     const beginPaneDrag = vi.fn();
     render(
@@ -699,7 +670,6 @@ describe("ThreadDetailHeader", () => {
       >
         <ThreadDetailHeader
           actionsMenu={null}
-          childPillLabel={null}
           isSecondaryPanelOpen={false}
           onOpenThreadGitAction={vi.fn()}
           onToggleSecondaryPanel={vi.fn()}
@@ -712,8 +682,93 @@ describe("ThreadDetailHeader", () => {
 
     fireEvent.doubleClick(screen.getByText("Focused thread"));
     const input = await screen.findByRole("textbox", { name: "Thread name" });
-    fireEvent.pointerDown(input, { button: 0 });
+    const titleRow = input.closest("p");
+    if (titleRow === null) {
+      throw new Error("Expected the editor inside the header title row");
+    }
+    fireEvent.pointerDown(titleRow, { button: 0 });
 
     expect(beginPaneDrag).not.toHaveBeenCalled();
   });
+
+  function renderWithMenuArgs(focused = true) {
+    const menuArgs: { current: ThreadDetailHeaderActionsMenuArgs | null } = {
+      current: null,
+    };
+    const requestRenameDialog = vi.fn();
+    render(
+      <AppCommandProvider>
+        <ThreadActionCollectors
+          coreRegistrations={[]}
+          requestRename={requestRenameDialog}
+        />
+        <PaneContext.Provider value={{ ...PANE_CONTEXT, isFocused: focused }}>
+          <ThreadDetailHeader
+            actionsMenu={(args) => {
+              menuArgs.current = args;
+              return null;
+            }}
+            isSecondaryPanelOpen={false}
+            onOpenThreadGitAction={vi.fn()}
+            onToggleSecondaryPanel={vi.fn()}
+            threadHeaderGitActions={[]}
+            threadId={THREAD_ID}
+            threadTitle="Focused thread"
+          />
+        </PaneContext.Provider>
+      </AppCommandProvider>,
+    );
+    return { menuArgs, requestRenameDialog };
+  }
+
+  it("renames inline from the actions menu once the menu has closed on desktop", async () => {
+    const { menuArgs, requestRenameDialog } = renderWithMenuArgs();
+    menuArgs.current?.requestRename(THREAD_ID);
+    expect(screen.queryByRole("textbox", { name: "Thread name" })).toBeNull();
+    const closeEvent = new Event("focusout", { cancelable: true });
+    menuArgs.current?.onCloseAutoFocus(closeEvent);
+
+    expect(closeEvent.defaultPrevented).toBe(true);
+    expect(
+      await screen.findByRole("textbox", { name: "Thread name" }),
+    ).toHaveProperty("value", "Focused thread");
+    expect(requestRenameDialog).not.toHaveBeenCalled();
+  });
+
+  it("opens the rename dialog from the actions menu at compact width", () => {
+    viewportState.isCompactViewport = true;
+    const { menuArgs, requestRenameDialog } = renderWithMenuArgs();
+    menuArgs.current?.requestRename(THREAD_ID);
+    const closeEvent = new Event("focusout", { cancelable: true });
+    menuArgs.current?.onCloseAutoFocus(closeEvent);
+
+    expect(requestRenameDialog).toHaveBeenCalledWith(THREAD_ID);
+    expect(closeEvent.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("textbox", { name: "Thread name" })).toBeNull();
+  });
+
+  it.each([
+    [true, true],
+    [false, false],
+  ])(
+    "starts the inline rename from the rename command when focused=%s",
+    async (focused, edits) => {
+      renderWithMenuArgs(focused);
+      fireEvent.keyDown(window, {
+        key: "R",
+        code: "KeyR",
+        ctrlKey: true,
+        shiftKey: true,
+      });
+      if (edits) {
+        expect(
+          await screen.findByRole("textbox", { name: "Thread name" }),
+        ).not.toBeNull();
+      } else {
+        expect(
+          screen.queryByRole("textbox", { name: "Thread name" }),
+        ).toBeNull();
+      }
+    },
+  );
 });

@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import type { Thread } from "@bb/domain";
 import { Button } from "@bb/shared-ui/button";
 import {
@@ -8,10 +9,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@bb/shared-ui/dialog";
+import { formatChildThreadCount } from "@/lib/child-thread-copy";
 
 export interface ThreadArchiveDialogTarget {
   thread: Thread;
-  childThreadCount?: number;
+  childThreadCount: number;
 }
 
 interface ThreadArchiveDialogProps {
@@ -27,9 +29,19 @@ export function ThreadArchiveDialog({
   onOpenChange,
   onArchive,
 }: ThreadArchiveDialogProps) {
+  const contentRef = useRef<HTMLDivElement>(null);
+
   return (
     <Dialog open={target !== null} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent
+        ref={contentRef}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          contentRef.current
+            ?.querySelector<HTMLButtonElement>('button[type="submit"]')
+            ?.focus();
+        }}
+      >
         {target ? (
           <ThreadArchiveDialogContent
             target={target}
@@ -56,24 +68,33 @@ export function ThreadArchiveDialogContent({
   onOpenChange,
   onArchive,
 }: ThreadArchiveDialogContentProps) {
-  const childThreadCount = target.childThreadCount ?? 0;
+  const { childThreadCount } = target;
   const active =
     target.thread.status === "starting" ||
     target.thread.status === "active" ||
     target.thread.status === "stopping";
-  const sentences = [
-    active ? "This will stop current work." : null,
-    childThreadCount > 0
-      ? `${childThreadCount} child ${childThreadCount === 1 ? "thread" : "threads"} will be archived too.`
-      : null,
-    "Archived threads stay available and can be unarchived.",
-  ].filter((sentence): sentence is string => sentence !== null);
 
   return (
-    <>
+    <form
+      className="grid gap-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!pending) {
+          onArchive(target);
+        }
+      }}
+    >
       <DialogHeader>
         <DialogTitle>Archive thread?</DialogTitle>
-        <DialogDescription>{sentences.join(" ")}</DialogDescription>
+        <DialogDescription>
+          {active ? "This will stop current work. " : null}
+          Its{" "}
+          <span className="font-semibold">
+            {formatChildThreadCount(childThreadCount)}
+          </span>{" "}
+          will be archived too. Archived threads stay available and can be
+          unarchived.
+        </DialogDescription>
       </DialogHeader>
       <DialogFooter>
         <Button
@@ -84,14 +105,10 @@ export function ThreadArchiveDialogContent({
         >
           Cancel
         </Button>
-        <Button
-          type="button"
-          disabled={pending}
-          onClick={() => onArchive(target)}
-        >
-          Archive thread
+        <Button type="submit" disabled={pending}>
+          Archive
         </Button>
       </DialogFooter>
-    </>
+    </form>
   );
 }

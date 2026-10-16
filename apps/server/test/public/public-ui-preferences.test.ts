@@ -31,12 +31,12 @@ async function resetPreference(
 
 describe("public ui preferences", () => {
   it.each(["__automatic__", "__builtin__", "inbox/inbox"])(
-    "normalizes legacy thread list selection %s while preserving explicit plugins",
+    "keeps thread list selection %s, reading legacy built-in as the bundled plugin",
     async (previous) => {
       await withTestHarness(async (harness) => {
         const key = "sidebar.threadListProvider";
         const expected =
-          previous === "inbox/inbox" ? previous : "thread-list/thread-list";
+          previous === "__builtin__" ? "thread-list/thread-list" : previous;
         overwriteStoredUiPreference(harness.deps.db, {
           key,
           valueJson: JSON.stringify(previous),
@@ -56,57 +56,47 @@ describe("public ui preferences", () => {
           await readJson(await resetPreference(harness, key)),
         ).toMatchObject({
           revision: 3,
-          value: "thread-list/thread-list",
+          value: "__automatic__",
         });
       });
     },
   );
 
-  it.each(["__automatic__", "__builtin__", "garden/icons"])(
-    "normalizes legacy navigation selection %s while preserving explicit plugins",
-    async (previous) => {
-      await withTestHarness(async (harness) => {
-        const key = "sidebar.navigationProvider";
-        const expected =
-          previous === "garden/icons" ? previous : "navigation/navigation";
-        expect(await readJson(await listPreferences(harness))).toMatchObject({
-          preferences: {
-            [key]: { revision: 0, value: "navigation/navigation" },
-          },
-        });
+  it("ignores stored rows for retired sidebar provider preferences", async () => {
+    await withTestHarness(async (harness) => {
+      const retired = ["sidebar.navigationProvider", "sidebar.headerProvider"];
+      for (const key of retired) {
         overwriteStoredUiPreference(harness.deps.db, {
           key,
-          valueJson: JSON.stringify(previous),
+          valueJson: JSON.stringify("garden/icons"),
         });
-        expect(await readJson(await listPreferences(harness))).toMatchObject({
-          preferences: { [key]: { revision: 1, value: expected } },
-        });
-      });
-    },
-  );
-
-  it.each([
-    ["__automatic__", "__builtin__"],
-    ["__builtin__", "__builtin__"],
-    ["garden/icons", "garden/icons"],
-  ])(
-    "keeps the sidebar header opt-in: %s resolves to %s",
-    async (previous, expected) => {
-      await withTestHarness(async (harness) => {
-        const key = "sidebar.headerProvider";
-        expect(await readJson(await listPreferences(harness))).toMatchObject({
-          preferences: { [key]: { revision: 0, value: "__builtin__" } },
-        });
-        overwriteStoredUiPreference(harness.deps.db, {
-          key,
-          valueJson: JSON.stringify(previous),
-        });
-        expect(await readJson(await listPreferences(harness))).toMatchObject({
-          preferences: { [key]: { revision: 1, value: expected } },
-        });
-      });
-    },
-  );
+        harness.deps.db.$client
+          .prepare(
+            "INSERT INTO ui_preference_defaults (key, value_json) VALUES (?, ?)",
+          )
+          .run(key, JSON.stringify("garden/icons"));
+      }
+      const listed = await listPreferences(harness);
+      expect(listed.status).toBe(200);
+      const body = (await readJson(listed)) as {
+        preferences: Record<string, unknown>;
+      };
+      expect(Object.keys(body.preferences).sort()).toEqual(
+        [...UI_PREFERENCE_KEYS].sort(),
+      );
+      for (const key of retired) {
+        expect(body.preferences).not.toHaveProperty([key]);
+        expect(
+          (
+            await putPreference(harness, key, {
+              expectedRevision: 1,
+              value: "garden/icons",
+            })
+          ).status,
+        ).toBe(404);
+      }
+    });
+  });
 
   it("persists hidden groups across organizations without changing saved order", async () => {
     await withTestHarness(async (harness) => {
@@ -418,14 +408,14 @@ describe("public ui preferences", () => {
 
       const invalidList = await putPreference(
         harness,
-        "sidebar.collapsedThreads",
+        "sidebar.hiddenFooterItems",
         { expectedRevision: 0, value: ["thr_1", 2] },
       );
       expect(invalidList.status).toBe(400);
 
       const missingValue = await putPreference(
         harness,
-        "sidebar.collapsedThreads",
+        "sidebar.hiddenFooterItems",
         { expectedRevision: 0, value: undefined },
       );
       expect(missingValue.status).toBe(400);

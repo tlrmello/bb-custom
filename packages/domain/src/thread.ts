@@ -7,6 +7,7 @@ import {
   queuedMessagePayloadSchema,
   queuedMessageWaitingOnSchema,
 } from "./queued-message.js";
+import { queuedMessageStateSchema } from "./queued-message-lifecycle.js";
 import {
   promptInputSchema,
   permissionModeSchema,
@@ -15,13 +16,11 @@ import {
 } from "./shared-types.js";
 import { threadStatusSchema, threadStatusValues } from "./thread-status.js";
 import { threadOriginKindSchema } from "./thread-origin-kind.js";
+import { threadParentNotificationsSchema } from "./thread-parent-notifications.js";
 import { threadVisibilitySchema } from "./thread-visibility.js";
 export { threadStatusSchema, threadStatusValues } from "./thread-status.js";
 export type { ThreadStatus } from "./thread-status.js";
-export {
-  threadOriginKindSchema,
-  threadOriginKindValues,
-} from "./thread-origin-kind.js";
+export { threadOriginKindSchema } from "./thread-origin-kind.js";
 export type { ThreadOriginKind } from "./thread-origin-kind.js";
 
 /**
@@ -37,7 +36,6 @@ export type { ThreadOriginKind } from "./thread-origin-kind.js";
 const threadRuntimeDisplayStatusValues = [
   ...threadStatusValues,
   "provisioning",
-  "host-reconnecting",
   "waiting-for-host",
 ] as const;
 const threadRuntimeDisplayStatusSchema = z.enum(
@@ -49,7 +47,6 @@ export type ThreadRuntimeDisplayStatus = z.infer<
 
 export const threadRuntimeStateSchema = z.object({
   displayStatus: threadRuntimeDisplayStatusSchema,
-  hostReconnectGraceExpiresAt: z.number().nullable(),
 });
 export type ThreadRuntimeState = z.infer<typeof threadRuntimeStateSchema>;
 
@@ -108,6 +105,7 @@ const workspaceChangeStatsSchema = z.object({
   insertions: z.number(),
   deletions: z.number(),
   lineStatsComplete: z.boolean(),
+  fileCount: z.number().int().nonnegative(),
   files: z.array(workspaceFileStatusSchema),
 });
 export type WorkspaceChangeStats = z.infer<typeof workspaceChangeStatsSchema>;
@@ -219,6 +217,8 @@ export const gitHostPullRequestSchema = z
     state: z.enum(["OPEN", "CLOSED", "MERGED"]),
     url: z.string().url(),
     isDraft: z.boolean(),
+    autoMerge: z.boolean(),
+    inMergeQueue: z.boolean().nullable(),
     baseRefName: z.string(),
     headRefName: z.string(),
     updatedAt: z.string().datetime(),
@@ -309,6 +309,7 @@ const threadPullRequestAttentionStateSchema = z.enum([
   "conflicts",
   "blocked",
   "draft",
+  "queued",
   "ready_to_merge",
   "merged",
   "closed",
@@ -327,6 +328,8 @@ export const threadPullRequestSchema = z
     baseRefName: z.string(),
     headRefName: z.string(),
     updatedAt: z.string().datetime(),
+    autoMerge: z.boolean(),
+    inMergeQueue: z.boolean().nullable(),
     checks: threadPullRequestChecksSchema,
     review: threadPullRequestReviewSchema,
     mergeability: threadPullRequestMergeabilitySchema,
@@ -359,11 +362,10 @@ export const threadQueuedMessageSchema = z.object({
    * eligible as soon as its other waits clear.
    */
   sendAt: z.number().int().nonnegative().nullable(),
+  state: queuedMessageStateSchema,
   /**
-   * Why this row is queued, or null for a plain queued row that is simply
-   * next in line behind the running turn. Null rather than a
-   * `{ kind: "thread-busy" }` default because rows written before waits were
-   * typed carry no reason at all, and inventing one for them would be a lie.
+   * Why this row is queued, or null for a `queued` row that is simply next in
+   * line behind the running turn.
    */
   waitingOn: queuedMessageWaitingOnSchema.nullable(),
   /**
@@ -408,6 +410,7 @@ export const threadSchema = z.object({
   originKind: threadOriginKindSchema.nullable(),
   originPluginId: z.string().nullable(),
   visibility: threadVisibilitySchema,
+  parentNotifications: threadParentNotificationsSchema,
   archivedAt: z.number().nullable(),
   pinnedAt: z.number().nullable(),
   deletedAt: z.number().nullable(),

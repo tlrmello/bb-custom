@@ -1,17 +1,20 @@
 import {
   archiveThread,
+  getAppSettings,
   updateHost,
   getQueuedThreadMessage,
   getThread,
   listEvents,
   listQueuedThreadMessages,
   markThreadDeleted,
+  setAppSettings,
   setQueuedThreadMessageFailureReason,
   setQueuedThreadMessageGroupBoundary,
 } from "@bb/db";
 import type { EnvironmentRow } from "@bb/db";
 import {
   changedMessageSchema,
+  threadScope,
   turnScope,
   type ServiceTier,
   type Thread,
@@ -34,6 +37,7 @@ import { acceptThreadSendRequest } from "../../src/services/threads/thread-send-
 import { handleUpdateEnvironmentDirectoryToolCall } from "../../src/services/threads/thread-environment-directory.js";
 import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/lifecycle-outcome.js";
 import { buildExecutionOptions } from "../../src/services/threads/thread-commands.js";
+import { applyThreadSessionOptionPatch } from "../../src/services/threads/thread-session-options.js";
 import { sendThreadMessage } from "../../src/services/threads/thread-send.js";
 import {
   internalAuthHeaders,
@@ -1403,7 +1407,135 @@ describe("idle cold-start activation", () => {
   });
 });
 
+describe("session option selection dispatch", () => {
+  async function submitOptionsAfter(
+    harness: TestAppHarness,
+    value: number,
+    choose: (thread: Thread) => void,
+  ) {
+    const { thread } = seedProviderThreadFixture({ harness, value });
+    threadEvents.appendThreadEvent(harness.deps, {
+      threadId: thread.id,
+      environmentId: thread.environmentId,
+      type: "thread/extensionState/updated",
+      scope: threadScope(),
+      data: {
+        providerThreadId: `provider-send-dispatch-${value}`,
+        kind: "bb/session-options",
+        payload: {
+          options: [
+            {
+              type: "select",
+              id: "mode",
+              label: "Mode",
+              value: "plan",
+              values: [
+                { id: "plan", label: "Plan" },
+                { id: "build", label: "Build" },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    choose(thread);
+    const queued = await createQueuedMessageForThread(harness.deps, {
+      thread,
+      payload: { input: textInput("next turn") },
+    });
+    await sendQueuedMessage(harness.deps, {
+      claimPolicy: {
+        kind: "automatic",
+        isGroupEligible: createAutomaticQueuedMessageGroupEligibility(
+          harness.deps,
+          { now: Date.now(), retryingFailure: false, thread },
+        ),
+        retryingFailure: false,
+      },
+      threadId: thread.id,
+      queuedMessageId: queued.id,
+      mode: "auto",
+    });
+    const commands = listQueuedThreadCommands(
+      harness,
+      "turn.submit",
+      thread.id,
+    );
+    expect(commands).toHaveLength(1);
+    const command = commands[0];
+    return command?.type === "turn.submit" ? command.options : null;
+  }
+
+  it("sends a chosen session option with the next turn, and nothing when no choice is pending", async () => {
+    await withTestHarness(async (harness) => {
+      expect(
+        await submitOptionsAfter(harness, 91, () => undefined),
+      ).not.toHaveProperty("sessionOptions");
+      expect(
+        await submitOptionsAfter(harness, 92, (thread) =>
+          applyThreadSessionOptionPatch(harness.deps, {
+            thread,
+            patch: { mode: "plan" },
+          }),
+        ),
+      ).not.toHaveProperty("sessionOptions");
+      expect(
+        await submitOptionsAfter(harness, 93, (thread) =>
+          applyThreadSessionOptionPatch(harness.deps, {
+            thread,
+            patch: { mode: "build" },
+          }),
+        ),
+      ).toMatchObject({ sessionOptions: { mode: "build" } });
+    });
+  });
+});
+
 describe("service tier execution lifecycle", () => {
+  it("dispatches a previously queued fast message at the default tier after fast is disabled", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedProviderThreadFixture({
+        harness,
+        value: 82,
+        serviceTier: "fast",
+      });
+      const queued = await createQueuedMessageForThread(harness.deps, {
+        thread,
+        payload: { input: textInput("queued fast turn"), serviceTier: "fast" },
+      });
+      expect(queued.serviceTier).toBe("fast");
+      setAppSettings(harness.db, {
+        ...getAppSettings(harness.db),
+        allowFastServiceTier: false,
+      });
+
+      await sendQueuedMessage(harness.deps, {
+        claimPolicy: {
+          kind: "automatic",
+          isGroupEligible: createAutomaticQueuedMessageGroupEligibility(
+            harness.deps,
+            { now: Date.now(), retryingFailure: false, thread },
+          ),
+          retryingFailure: false,
+        },
+        threadId: thread.id,
+        queuedMessageId: queued.id,
+        mode: "auto",
+      });
+
+      expect(
+        threadEvents.getLastExecutionOptions(harness.deps, thread.id),
+      ).toMatchObject({ serviceTier: "default" });
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toContainEqual(
+        expect.objectContaining({
+          options: expect.objectContaining({ serviceTier: "default" }),
+        }),
+      );
+    });
+  });
+
   it.each(["fast", "default"] as const)(
     "uses an accepted direct %s choice as the next default",
     async (serviceTier) => {

@@ -8,11 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { useNavigate } from "react-router-dom";
-import {
-  getThreadRoutePath,
-  type ThreadRoutePathArgs,
-} from "@/lib/route-paths";
+import type { ThreadRoutePathArgs } from "@/lib/route-paths";
 import type { PluginComposerHost } from "@/components/plugin/plugin-composer-host";
 import type { SplitSide } from "@/lib/split-layout";
 
@@ -136,18 +132,15 @@ export function useOptionalPaneContext(): PaneContextValue | null {
 
 interface DefaultPaneContextProviderProps {
   children: ReactNode;
+  onRequestClose: (() => void) | null;
+  navigateInPane: (thread: ThreadRoutePathArgs) => void;
 }
 
 export function DefaultPaneContextProvider({
   children,
+  onRequestClose,
+  navigateInPane,
 }: DefaultPaneContextProviderProps) {
-  const navigate = useNavigate();
-  const navigateInPane = useCallback(
-    (thread: ThreadRoutePathArgs) => {
-      navigate(getThreadRoutePath(thread));
-    },
-    [navigate],
-  );
   const value = useMemo<PaneContextValue>(
     () => ({
       paneId: "main",
@@ -155,7 +148,7 @@ export function DefaultPaneContextProvider({
       isSplitPane: false,
       secondaryPanelHost: null,
       reservesWindowPanelToggle: false,
-      onRequestClose: null,
+      onRequestClose,
       onCreatePane: null,
       isMaximized: false,
       onToggleMaximize: null,
@@ -164,7 +157,7 @@ export function DefaultPaneContextProvider({
       ownsWindowTopLeft: true,
       navigateInPane,
     }),
-    [navigateInPane],
+    [navigateInPane, onRequestClose],
   );
 
   return <PaneContext.Provider value={value}>{children}</PaneContext.Provider>;

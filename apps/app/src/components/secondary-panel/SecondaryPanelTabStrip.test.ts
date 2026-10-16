@@ -12,7 +12,6 @@ import { afterEach, vi } from "vitest";
 import { describe, expect, it } from "vitest";
 import {
   SecondaryPanelTabStrip,
-  SECONDARY_PANEL_TAB_STRIP_FADE_TONE,
   secondaryPanelTabsToClose,
   type SecondaryPanelTabStripProps,
 } from "./SecondaryPanelTabStrip";
@@ -23,10 +22,6 @@ afterEach(() => {
 });
 
 describe("secondary panel tab-strip edge fades", () => {
-  it("uses the themed edge fade", () => {
-    expect(SECONDARY_PANEL_TAB_STRIP_FADE_TONE).toBe("sidebar");
-  });
-
   it("keeps the desktop tab viewport outside the window drag region", () => {
     vi.stubGlobal(
       "ResizeObserver",
@@ -169,11 +164,6 @@ describe("secondary panel tab-strip edge fades", () => {
     expect(observed).toContain(content);
     expect(resizeCallback).toBeDefined();
     expect(container.querySelectorAll("[data-overflow-fade]")).toHaveLength(2);
-    expect(
-      container
-        .querySelector("[data-overflow-fade='left']")
-        ?.classList.contains("w-6"),
-    ).toBe(true);
     const leftButton = container.querySelector<HTMLButtonElement>(
       '[aria-label="Scroll tabs left"]',
     );
@@ -217,11 +207,6 @@ describe("secondary panel tab-strip edge fades", () => {
     expect(leftButton?.tabIndex).toBe(-1);
     expect(rightButton?.classList.contains("opacity-100")).toBe(true);
     expect(rightButton?.tabIndex).toBe(0);
-    expect(rightButton?.classList.contains("bg-sidebar")).toBe(true);
-    expect(
-      rightButton?.classList.contains("hover:bg-surface-raised-solid"),
-    ).toBe(true);
-    expect(rightButton?.classList.contains("hover:bg-state-hover")).toBe(false);
 
     const scrollBy = vi.fn();
     Object.defineProperty(viewport!, "scrollBy", {

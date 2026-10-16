@@ -3,6 +3,7 @@ import {
   type HostDaemonActiveThread,
   type HostDaemonLoadedEnvironment,
   type HostDaemonConnectSharesReplaceMessage,
+  type HostDaemonOnlineRpcCancelMessage,
   type HostDaemonOnlineRpcRequestMessage,
   type HostDaemonServerWsMessage,
   type HostDaemonSessionOpenResponse,
@@ -48,6 +49,7 @@ export type HostDaemonServerTerminalMessage = Exclude<
   | { type: "heartbeat-ack" }
   | { type: "machine-environment.replace" }
   | HostDaemonOnlineRpcRequestMessage
+  | HostDaemonOnlineRpcCancelMessage
   | HostDaemonWatchSetReplaceMessage
   | HostDaemonConnectSharesReplaceMessage
 >;
@@ -83,6 +85,7 @@ export interface ServerConnectionOptions {
   getActiveThreads?: () =>
     | HostDaemonActiveThread[]
     | Promise<HostDaemonActiveThread[]>;
+  getUndeliveredEventThreadIds?: () => string[];
   getLoadedEnvironments?: () =>
     | HostDaemonLoadedEnvironment[]
     | Promise<HostDaemonLoadedEnvironment[]>;
@@ -92,6 +95,7 @@ export interface ServerConnectionOptions {
   onHostRpcRequest?: (
     message: HostDaemonOnlineRpcRequestMessage,
   ) => void | Promise<void>;
+  onHostRpcCancel?: (message: HostDaemonOnlineRpcCancelMessage) => void;
   onWatchSetReplace?: (
     message: HostDaemonWatchSetReplaceMessage,
   ) => void | Promise<void>;
@@ -111,7 +115,7 @@ export interface ServerConnectionOptions {
 }
 
 export const DEFAULT_MIN_RECONNECTION_DELAY = 1_000;
-export const DEFAULT_MAX_RECONNECTION_DELAY = 30_000;
+export const DEFAULT_MAX_RECONNECTION_DELAY = 10_000;
 export const DEFAULT_RECONNECTION_DELAY_GROW_FACTOR = 2;
 export const DEFAULT_CONNECTION_TIMEOUT_MS = 10_000;
 export const DEFAULT_STARTUP_TIMEOUT_MS = 60_000;

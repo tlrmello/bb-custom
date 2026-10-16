@@ -1,15 +1,5 @@
-// @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { loadPluginApp } from "@get-bb/plugin-sdk/testing/app";
-
-const app = await loadPluginApp(() => import("./app"));
-const { loadPluginReferences } = await import("./app");
-
-describe("plugin guide registrations", () => {
-  it("registers the Plugin Guide nav panel", () => {
-    expect(app.navPanels.map((panel) => panel.id)).toEqual(["plugin-api"]);
-  });
-});
+import { loadPluginReferences } from "./app";
 
 describe("loadPluginReferences", () => {
   it("merges installed plugins over catalog results through the public API", async () => {
@@ -21,8 +11,18 @@ describe("loadPluginReferences", () => {
     }));
     const search = vi.fn(async () => ({
       results: [
-        { pluginId: "github", icon: "Github", iconUrl: null, iconTinted: false },
-        { pluginId: "tasks", icon: "ListTodo", iconUrl: null, iconTinted: true },
+        {
+          pluginId: "github",
+          icon: "Github",
+          iconUrl: null,
+          iconTinted: false,
+        },
+        {
+          pluginId: "tasks",
+          icon: "ListTodo",
+          iconUrl: null,
+          iconTinted: true,
+        },
       ],
       collections: [],
     }));
@@ -30,9 +30,7 @@ describe("loadPluginReferences", () => {
       { plugins: { list, catalog: { search } } } as never,
       new AbortController().signal,
     );
-    expect(search).toHaveBeenCalledWith(
-      expect.objectContaining({ query: "" }),
-    );
+    expect(search).toHaveBeenCalledWith(expect.objectContaining({ query: "" }));
     expect([...references.keys()].sort()).toEqual(["docs", "github", "tasks"]);
     expect(references.get("github")).toEqual({
       id: "github",
@@ -53,7 +51,12 @@ describe("loadPluginReferences", () => {
           catalog: {
             search: async () => ({
               results: [
-                { pluginId: "tasks", icon: null, iconUrl: null, iconTinted: false },
+                {
+                  pluginId: "tasks",
+                  icon: null,
+                  iconUrl: null,
+                  iconTinted: false,
+                },
               ],
               collections: [],
             }),

@@ -19,7 +19,7 @@ List and create require exactly one explicit scope:
 
   bb terminal create --thread <thread-id> --command "pnpm dev"
   bb terminal create --environment <environment-id>
-  bb terminal create --machine <id-or-name> [--cwd <path>]
+  bb terminal create --machine <id-or-name> [--cwd <path>]   (alias: start)
     --host <id-or-name>                   Alias for --machine
     --title <title>                       Display title
     --cols <n>                            Initial terminal columns
@@ -29,6 +29,15 @@ List and create require exactly one explicit scope:
 
 Machine names are resolved to an explicit machine ID. No scope defaults to the
 server machine, and --cwd is valid only with --machine or --host.
+
+A terminal runs the machine's own shell: $SHELL (then zsh, bash, sh) on macOS
+and Linux; on Windows, PowerShell 7 when `pwsh` is on PATH, otherwise Windows
+PowerShell, otherwise cmd. Write --command in that shell's syntax. To run a
+program with arguments without knowing the shell, pass them after `--`
+(`bb terminal create --thread <id> -- pnpm test "my file.ts"`): the machine
+quotes each argument for its own shell. `send --enter` presses Enter (a carriage
+return), which every one of those shells accepts. The terminal's exit code is
+the command's own exit code on every shell.
 
 All other operations need only the terminal ID. They also accept the scope
 flags above and ignore them, so a command built for `list` or `create` still
@@ -41,7 +50,7 @@ runs:
   bb terminal resize <terminal-id> --cols <n> --rows <n>
   bb terminal rename <terminal-id> <title>
   bb terminal restart <terminal-id>       Atomically replaces it with a shell; does not replay the original command
-  bb terminal close <terminal-id> [--if-clean]
+  bb terminal close <terminal-id> [--if-clean]   (alias: stop)
 
   bb terminal output <terminal-id>
     --since-seq <n>                       Read output chunks from a sequence

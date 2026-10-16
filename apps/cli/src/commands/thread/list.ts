@@ -8,12 +8,19 @@ import {
   printBorderlessTable,
   truncateCell,
 } from "../../table.js";
-import { outputJson } from "../helpers.js";
+import { collectOption, outputJson } from "../helpers.js";
+import {
+  resolveMachineHostId,
+  resolveMachineTargetOption,
+} from "../machine.js";
 
 interface ThreadListCommandOptions {
   environment?: string;
+  machine?: string;
+  host?: string;
   project?: string;
   parentThread?: string;
+  thread: string[];
   archived?: boolean;
   section?: string;
   unsectioned?: boolean;
@@ -30,7 +37,18 @@ export function registerListCommand(
     .description("List threads")
     .option("--project <id>", "Filter by project ID (defaults to all projects)")
     .option("--environment <id>", "Filter by environment ID")
+    .option(
+      "--machine <id-or-name>",
+      "Filter by machine ID or active machine name",
+    )
+    .option("--host <id-or-name>", "Alias for --machine")
     .option("--parent-thread <id>", "Filter by parent thread ID")
+    .option(
+      "--thread <id>",
+      "Show only this thread ID, leaving out unknown or deleted IDs (repeatable, up to 200)",
+      collectOption,
+      [],
+    )
     .option("--section <id>", "Filter by thread section ID")
     .option("--unsectioned", "Show only threads outside sections")
     .option("--archived", "Show only archived threads")
@@ -47,10 +65,27 @@ export function registerListCommand(
           flagName: "--parent-thread",
           value: opts.parentThread,
         });
+        const threadIds = opts.thread.flatMap(
+          (value) =>
+            resolveExplicitIdFlag({ flagName: "--thread", value }) ?? [],
+        );
         const environmentId = resolveExplicitIdFlag({
           flagName: "--environment",
           value: opts.environment,
         });
+        const machineTarget = resolveMachineTargetOption(opts);
+        const hostId =
+          machineTarget === undefined
+            ? undefined
+            : machineTarget.trim().startsWith("host_")
+              ? resolveExplicitIdFlag({
+                  flagName: "--machine",
+                  value: machineTarget,
+                })
+              : await resolveMachineHostId({
+                  serverUrl: getUrl(),
+                  target: machineTarget,
+                });
         if (opts.section && opts.unsectioned) {
           throw new Error("Cannot combine --section with --unsectioned.");
         }
@@ -61,7 +96,9 @@ export function registerListCommand(
         const threads = await sdk.threads.list({
           ...(projectId ? { projectId } : {}),
           ...(environmentId ? { environmentId } : {}),
+          ...(hostId ? { hostId } : {}),
           ...(parentThreadId ? { parentThreadId } : {}),
+          ...(threadIds.length > 0 ? { threadIds } : {}),
           ...(opts.archived ? { archived: true } : {}),
           ...(sectionId ? { sectionId } : {}),
           ...(opts.unsectioned ? { unsectioned: true } : {}),

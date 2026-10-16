@@ -38,8 +38,7 @@ import {
 } from "./panelChromeClasses";
 import {
   CONVERSATION_COLLAPSED_PANEL_SIZE_PERCENT,
-  THREAD_SECONDARY_PANEL_MAX_SIZE_PERCENT,
-  THREAD_SECONDARY_PANEL_MIN_SIZE_PERCENT,
+  useSecondaryPanelMinimum,
 } from "./secondaryPanelSizing";
 import {
   RIGHT_PANEL_TOGGLE_ICON_NAME,
@@ -49,6 +48,7 @@ import { SecondaryPanelHostLayoutContext } from "./SecondaryPanelHostLayoutConte
 import { MobilePanelTabPager } from "./MobilePanelTabPager";
 import { SecondaryPanelTabStrip } from "./SecondaryPanelTabStrip";
 import { ImageTabLightboxProvider } from "./ImageTabLightboxContext";
+import { FilePreviewScrollPositionContext } from "./filePreviewScrollPositionContext";
 import type {
   MarketplacePluginDetailPanelTab,
   SecondaryPanelPaneRenderContext,
@@ -64,23 +64,39 @@ import {
   summarizeDiffFileEntries,
   useDiffFilesCollapseControls,
 } from "./git-diff/diffFilesStore";
-import { buildGitDiffIdentity } from "./git-diff/gitDiffPanelHelpers";
+import {
+  buildGitDiffIdentity,
+  filterDiffFilesByPath,
+} from "./git-diff/gitDiffPanelHelpers";
 import { useSecondaryPanelResize } from "./useSecondaryPanelResize";
 import { threadSecondaryPanelResizingAtom } from "./threadSecondaryPanelAtoms";
 import { GitDiffToolbar } from "./GitDiffToolbar";
-import { GitDiffTabContent } from "./ThreadSecondaryPanelTabContent";
+import {
+  GitDiffLoadingSkeleton,
+  GitDiffTabContent,
+} from "./ThreadSecondaryPanelTabContent";
 import {
   CHROME_ROW_CLASS,
   getBbDesktopInfo,
   MACOS_CHROME_CONTROL_AXIS_CLASS,
   MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS,
+  MACOS_TITLE_BAR_COLLAPSED_SIDEBAR_RESERVE_CLASS,
+  MACOS_TITLE_BAR_BAND_CLASS,
+  MACOS_TITLE_BAR_CONTROL_AXIS_CLASS,
+  MACOS_TITLE_BAR_CONTROL_SIZE_CLASS,
+  MACOS_TITLE_BAR_TRAILING_TOGGLE_CLASS,
   MACOS_WINDOW_DRAG_CLASS,
   MACOS_WINDOW_NO_DRAG_CLASS,
   shouldReserveMacosTrafficLights,
   shouldUseMacosDesktopChrome,
 } from "@/lib/bb-desktop";
 import { useDesktopWindowState } from "@/hooks/useDesktopWindowState";
-import { useOptionalIsSidebarShowing } from "@/components/ui/sidebar.js";
+import { TitleBarScrollFade } from "@/components/ui/title-bar-scroll-fade";
+import {
+  useIsSidebarFramed,
+  useOptionalIsSidebarShowing,
+  useSidebarKeepsCollapsedRail,
+} from "@/components/ui/sidebar.js";
 import { IframeDragGuardOverlay } from "@/lib/iframe-drag-guard";
 import type {
   FixedPanelViewTab,
@@ -128,24 +144,41 @@ export function getSecondaryPanelChromeStackClassName(
   );
 }
 
+const FRAMED_PANEL_SURFACE_CLASS =
+  "isolate bg-transparent before:pointer-events-none before:absolute before:inset-x-0 before:bottom-0 before:top-[calc(var(--bb-window-title-bar-height)+1px)] before:-z-10 before:rounded-tr-(--bb-frame-card-radius) before:bg-sidebar";
+
 interface CollapsedPanelTrafficLightReserveArgs {
   isConversationCollapsed: boolean;
+  isPanelInFrame: boolean;
   renderAsDrawer: boolean;
   isSidebarShowing: boolean | null;
+  sidebarKeepsCollapsedRail: boolean;
   reserveMacosTrafficLights: boolean;
 }
 
 export function resolveCollapsedPanelTrafficLightReserveClassName({
   isConversationCollapsed,
+  isPanelInFrame,
   renderAsDrawer,
   isSidebarShowing,
+  sidebarKeepsCollapsedRail,
   reserveMacosTrafficLights,
 }: CollapsedPanelTrafficLightReserveArgs): string | false {
-  const reserves =
-    reserveMacosTrafficLights &&
-    (renderAsDrawer ||
-      (isConversationCollapsed && isSidebarShowing === false));
-  return reserves && MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS;
+  if (isPanelInFrame) {
+    return (
+      isConversationCollapsed &&
+      isSidebarShowing === false &&
+      MACOS_TITLE_BAR_COLLAPSED_SIDEBAR_RESERVE_CLASS
+    );
+  }
+  if (!reserveMacosTrafficLights) return false;
+  if (renderAsDrawer) return MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS;
+  return (
+    isConversationCollapsed &&
+    isSidebarShowing === false &&
+    !sidebarKeepsCollapsedRail &&
+    MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS
+  );
 }
 
 const HIDE_PANEL_LABEL = "Hide right panel";
@@ -180,6 +213,7 @@ export interface ThreadSecondaryPanelProps {
   splitPanelStateId?: string;
   isOpen: boolean;
   showConversationCollapseControl?: boolean;
+  showFullScreenShortcut?: boolean;
   showNewTabButton?: boolean;
   inlinePanelToggle?: "button" | "hidden";
   resizablePanelId?: string;
@@ -197,6 +231,7 @@ export interface ThreadSecondaryPanelProps {
   isConversationCollapsed: boolean;
   onToggleConversationCollapse: () => void;
   renderAsDrawer: boolean;
+  isAtWindowTop?: boolean;
 }
 
 export function ThreadSecondaryPanel(props: ThreadSecondaryPanelProps) {
@@ -219,6 +254,7 @@ function ThreadSecondaryPanelContent({
   splitPanelStateId,
   isOpen,
   showConversationCollapseControl = true,
+  showFullScreenShortcut = false,
   showNewTabButton = true,
   inlinePanelToggle = "button",
   resizablePanelId = "thread-detail-secondary-panel",
@@ -237,16 +273,32 @@ function ThreadSecondaryPanelContent({
   isConversationCollapsed,
   onToggleConversationCollapse,
   renderAsDrawer,
+  isAtWindowTop = false,
 }: ThreadSecondaryPanelProps) {
   const resolvedGitDiffTabStatus =
     gitDiffTabStatus ?? (canUseGitUi ? "eligible" : "ineligible");
   const newTabShortcut = useAppCommandShortcut("panel.newTab");
   const togglePanelShortcut = useAppCommandShortcut("panel.toggle");
+  const boundFullScreenShortcut = useAppCommandShortcut(
+    "panel.fullScreen.toggle",
+  );
+  const fullScreenShortcut = showFullScreenShortcut
+    ? boundFullScreenShortcut
+    : null;
   const diffShortcut = useAppCommandShortcut("diff.toggle");
   const visibleTabs = useMemo(
     () => tabs.filter((tab) => tab.isHidden !== true),
     [tabs],
   );
+  const [filePreviewScrollPositions] = useState(
+    () => new Map<string, { scrollTop: number }>(),
+  );
+  useLayoutEffect(() => {
+    const openTabIds = new Set(tabs.map((tab) => tab.tab.id));
+    for (const tabId of filePreviewScrollPositions.keys()) {
+      if (!openTabIds.has(tabId)) filePreviewScrollPositions.delete(tabId);
+    }
+  }, [tabs, filePreviewScrollPositions]);
   const activeRenderableTab =
     tabs.find((tab) => tab.tab.id === activeTab?.id) ??
     (activeTab === null && fixedTabs.length === 0 ? visibleTabs[0] : undefined);
@@ -272,6 +324,8 @@ function ThreadSecondaryPanelContent({
   } = useSecondaryPanelResize({
     isSecondaryPanelOpen: isOpen,
     onPanelWidthChange: handleSecondaryPanelWidthChange,
+    panelId: resizablePanelId,
+    renderAsDrawer,
   });
   const hasPanelExpandedRef = useRef(false);
   useLayoutEffect(() => {
@@ -286,6 +340,7 @@ function ThreadSecondaryPanelContent({
     },
     [handleSecondaryPanelResize],
   );
+  const minimumSize = useSecondaryPanelMinimum();
   const hostLayout = useContext(SecondaryPanelHostLayoutContext);
   const handlePanelCollapse = useCallback(() => {
     if (!isOpen || hostLayout?.isSuppressed) {
@@ -326,10 +381,12 @@ function ThreadSecondaryPanelContent({
     (resolvedGitDiffTabStatus === "loading" ||
       resolvedGitDiffTabStatus === "error");
   const {
+    gitDiffFileFilter,
     gitDiffTarget,
     gitDiffSelectOptions,
     gitDiffSelectValue,
     onGitDiffSelectionChange,
+    setGitDiffFileFilter,
   } = useGitDiffPanelState({
     environmentId,
     isDiffPanelActive: isDiffPanelLive,
@@ -368,12 +425,20 @@ function ThreadSecondaryPanelContent({
       }),
     [diffMergeBaseRef, environmentId, gitDiffTarget],
   );
+  const filteredDiffFiles = useMemo(
+    () => filterDiffFilesByPath(diffFiles, gitDiffFileFilter ?? ""),
+    [diffFiles, gitDiffFileFilter],
+  );
   const gitDiffStats = useMemo(
-    () => summarizeDiffFileEntries(diffFiles),
-    [diffFiles],
+    () => summarizeDiffFileEntries(filteredDiffFiles),
+    [filteredDiffFiles],
   );
   const { areAllCollapsed, toggleAllCollapsed, hasFiles } =
-    useDiffFilesCollapseControls(diffIdentity, diffFiles);
+    useDiffFilesCollapseControls(
+      diffIdentity,
+      filteredDiffFiles,
+      diffFiles.length,
+    );
   const isSecondaryPanelResizing = useAtomValue(
     threadSecondaryPanelResizingAtom,
   );
@@ -383,11 +448,16 @@ function ThreadSecondaryPanelContent({
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
   const desktopWindowState = useDesktopWindowState();
   const isSidebarShowing = useOptionalIsSidebarShowing();
+  const isFramed = useIsSidebarFramed();
+  const isPanelInFrame = isFramed && isAtWindowTop && !renderAsDrawer;
+  const sidebarKeepsCollapsedRail = useSidebarKeepsCollapsedRail();
   const collapsedPanelTrafficLightReserveClassName =
     resolveCollapsedPanelTrafficLightReserveClassName({
       isConversationCollapsed,
+      isPanelInFrame,
       renderAsDrawer,
       isSidebarShowing,
+      sidebarKeepsCollapsedRail,
       reserveMacosTrafficLights: shouldReserveMacosTrafficLights({
         desktopInfo,
         windowState: desktopWindowState,
@@ -465,6 +535,7 @@ function ThreadSecondaryPanelContent({
         CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS,
         "relative",
         usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
+        isPanelInFrame && MACOS_TITLE_BAR_TRAILING_TOGGLE_CLASS,
       )}
       onClick={onClose}
       aria-label={
@@ -525,6 +596,7 @@ function ThreadSecondaryPanelContent({
           isFullScreen={isFullScreen ?? false}
           onMoveToSide={onMoveActiveTabToSide}
           onToggleFullScreen={onToggleFullScreen}
+          shortcut={fullScreenShortcut ?? undefined}
         />
       );
     }
@@ -545,13 +617,21 @@ function ThreadSecondaryPanelContent({
               usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
             )}
             onClick={conversationCollapseControl.onClick}
-            aria-label={conversationCollapseControl.label}
+            aria-label={
+              fullScreenShortcut
+                ? `${conversationCollapseControl.label} (${fullScreenShortcut.label})`
+                : conversationCollapseControl.label
+            }
+            aria-keyshortcuts={fullScreenShortcut?.ariaKeyshortcuts}
             aria-pressed={conversationCollapseControl.isFullScreen}
           >
             <Icon name={conversationCollapseControl.iconName} />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{conversationCollapseControl.label}</TooltipContent>
+        <TooltipContent>
+          <span>{conversationCollapseControl.label}</span>
+          {fullScreenShortcut ? ` (${fullScreenShortcut.label})` : ""}
+        </TooltipContent>
       </Tooltip>
     );
   };
@@ -709,6 +789,18 @@ function ThreadSecondaryPanelContent({
         : activeSurfaceTab.renderContent(paneRenderContext);
     const surfaceContentFillsRegion =
       activeSurfaceTab?.contentFillsRegion === true;
+    const filePreviewScrollPosition =
+      activeSurfaceModel === null || isBrowserSurfaceActive
+        ? null
+        : (filePreviewScrollPositions.get(activeSurfaceModel.id) ?? {
+            scrollTop: 0,
+          });
+    if (activeSurfaceModel !== null && filePreviewScrollPosition !== null) {
+      filePreviewScrollPositions.set(
+        activeSurfaceModel.id,
+        filePreviewScrollPosition,
+      );
+    }
     const fixedSurfaceContent =
       activeSurfaceFixedTab?.renderContent?.(paneRenderContext);
     const fixedSurfaceContentFillsRegion =
@@ -726,8 +818,9 @@ function ThreadSecondaryPanelContent({
         tabs={surfaceTabs}
       >
         <div
-          className={getSecondaryPanelChromeStackClassName(
-            showsSurfaceDiffToolbar,
+          className={cn(
+            getSecondaryPanelChromeStackClassName(showsSurfaceDiffToolbar),
+            isPanelInFrame && "bg-transparent",
           )}
         >
           <div
@@ -735,11 +828,18 @@ function ThreadSecondaryPanelContent({
             className={cn(
               CHROME_ROW_CLASS,
               "min-w-0 justify-between gap-2",
-              renderAsDrawer ? "px-2" : "px-4",
+              renderAsDrawer ? "px-2" : "px-(--bb-panel-chrome-padding)",
               usesDesktopChrome && usesWindowChrome && MACOS_WINDOW_DRAG_CLASS,
               usesDesktopChrome &&
-                usesWindowChrome &&
-                MACOS_CHROME_CONTROL_AXIS_CLASS,
+                usesWindowChrome && [
+                  MACOS_CHROME_CONTROL_AXIS_CLASS,
+                  MACOS_TITLE_BAR_CONTROL_SIZE_CLASS,
+                ],
+              isPanelInFrame &&
+                usesWindowChrome && [
+                  MACOS_TITLE_BAR_BAND_CLASS,
+                  MACOS_TITLE_BAR_CONTROL_AXIS_CLASS,
+                ],
             )}
           >
             <div
@@ -804,7 +904,11 @@ function ThreadSecondaryPanelContent({
                 isDiffFilesLoading || gitDiffTarget === undefined
               }
               stats={gitDiffStats}
+              isStatsLoading={isDiffFilesLoading || gitDiffTarget === undefined}
+              totalFilesCount={diffFiles.length}
               isTruncated={isGitDiffTruncated}
+              fileFilter={gitDiffFileFilter}
+              onFileFilterChange={setGitDiffFileFilter}
               areAllFilesCollapsed={areAllCollapsed}
               isCollapseAllDisabled={!hasFiles || isDiffFilesLoading}
               onToggleAllCollapsed={toggleAllCollapsed}
@@ -815,7 +919,10 @@ function ThreadSecondaryPanelContent({
             />
           ) : null}
         </div>
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-sidebar">
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-sidebar">
+          {isPanelInFrame && usesWindowChrome ? (
+            <TitleBarScrollFade tone="sidebar" />
+          ) : null}
           {browserSurface}
           {isBrowserSurfaceActive ? null : hasActiveSurfaceTab ? (
             <div
@@ -830,11 +937,15 @@ function ThreadSecondaryPanelContent({
                   : ""
               }
             >
-              {surfaceContent ?? (
-                <EmptyStatePanel className="mx-4 rounded-lg">
-                  No file preview content provided.
-                </EmptyStatePanel>
-              )}
+              <FilePreviewScrollPositionContext.Provider
+                value={filePreviewScrollPosition}
+              >
+                {surfaceContent ?? (
+                  <EmptyStatePanel className="mx-4 rounded-lg">
+                    No file preview content provided.
+                  </EmptyStatePanel>
+                )}
+              </FilePreviewScrollPositionContext.Provider>
             </div>
           ) : activeSurfaceFixedTab !== undefined &&
             fixedSurfaceContent !== undefined ? (
@@ -848,8 +959,8 @@ function ThreadSecondaryPanelContent({
               {fixedSurfaceContent}
             </div>
           ) : isSurfaceDiffEligibilityPending ? (
-            <EmptyStatePanel className="m-4 rounded-lg" role="status">
-              {resolvedGitDiffTabStatus === "error" ? (
+            resolvedGitDiffTabStatus === "error" ? (
+              <EmptyStatePanel className="m-4 rounded-lg" role="status">
                 <div className="flex flex-col items-center gap-3 text-center">
                   <span>
                     Could not determine whether this workspace uses Git.
@@ -865,16 +976,17 @@ function ThreadSecondaryPanelContent({
                     </Button>
                   ) : null}
                 </div>
-              ) : (
-                "Checking Git support…"
-              )}
-            </EmptyStatePanel>
+              </EmptyStatePanel>
+            ) : (
+              <GitDiffLoadingSkeleton />
+            )
           ) : isSurfaceDiffActive ? (
             <GitDiffTabContent
               environmentId={environmentId}
               target={gitDiffTarget}
               isPanelOpen={isLayoutOpen}
               gitDiffPresentation={gitDiffPresentation}
+              fileFilter={gitDiffFileFilter ?? ""}
               onClearPendingGitDiffIntent={onClearPendingGitDiffIntent}
               onOpenFileInEditor={onOpenFileInEditor}
               onOpenFilePreview={onOpenFilePreview}
@@ -886,11 +998,11 @@ function ThreadSecondaryPanelContent({
             <div className="flex min-h-0 flex-1 flex-col">
               {metadataContent}
             </div>
-          ) : (
+          ) : isLayoutOpen ? (
             <EmptyStatePanel className="m-4 rounded-lg">
               This panel view is unavailable.
             </EmptyStatePanel>
-          )}
+          ) : null}
         </div>
       </ImageTabLightboxProvider>
     );
@@ -1037,11 +1149,14 @@ function ThreadSecondaryPanelContent({
       className={cn(
         "flex h-full min-h-0 flex-col overflow-hidden bg-sidebar",
         renderAsDrawer && "min-w-0 flex-1",
+        isPanelInFrame && FRAMED_PANEL_SURFACE_CLASS,
         !renderAsDrawer && [
           "absolute inset-y-0 left-0",
           hostLayout === null &&
             !isConversationCollapsed &&
-            "border-l border-border-seam",
+            (isPanelInFrame
+              ? "border-l border-border"
+              : "border-l border-border-seam"),
           isSecondaryPanelResizing && "right-0",
           !isOpen && "pointer-events-none",
         ],
@@ -1079,12 +1194,8 @@ function ThreadSecondaryPanelContent({
               : persistedWidthPercent
             : 0
         }
-        minSize={THREAD_SECONDARY_PANEL_MIN_SIZE_PERCENT}
-        maxSize={
-          isConversationCollapsed
-            ? CONVERSATION_COLLAPSED_PANEL_SIZE_PERCENT
-            : THREAD_SECONDARY_PANEL_MAX_SIZE_PERCENT
-        }
+        minSize={(1 - minimumSize.max) * 100}
+        maxSize={isConversationCollapsed ? 100 : (1 - minimumSize.min) * 100}
         onCollapse={handlePanelCollapse}
         onResize={handlePanelResize}
         onTransitionEnd={handlePanelTransitionEnd}
@@ -1204,6 +1315,7 @@ function SecondaryPanelResizeHandle({
   hitTargetRef,
 }: SecondaryPanelResizeHandleProps) {
   const isResizing = useAtomValue(threadSecondaryPanelResizingAtom);
+  const dividerClass = useIsSidebarFramed() ? "bg-border" : "bg-border-seam";
   return (
     <PanelResizeHandle
       id="thread-detail-secondary-panel-handle"
@@ -1218,7 +1330,8 @@ function SecondaryPanelResizeHandle({
         isConversationCollapsed ? "cursor-default" : "cursor-col-resize",
         matchesSplitDividers
           ? [
-              "bg-border-seam hover:bg-ring/40",
+              dividerClass,
+              "hover:bg-ring/40",
               isOpen && !isConversationCollapsed
                 ? "w-px opacity-100"
                 : "pointer-events-none w-0 opacity-0",
@@ -1246,7 +1359,7 @@ function SecondaryPanelResizeHandle({
             "pointer-events-none absolute inset-y-0 left-full z-10 w-px transition-colors",
             isResizing
               ? "bg-accent-foreground/50"
-              : "bg-border-seam group-hover:bg-accent-foreground/35",
+              : [dividerClass, "group-hover:bg-accent-foreground/35"],
           )}
         />
       )}
