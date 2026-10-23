@@ -39,7 +39,9 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { ImageLightbox, getWrappedImageIndex } from "./image-lightbox.js";
 import { InlineImageGalleryContext } from "./inline-image-gallery-context.js";
+import { remarkInlineDollarMath } from "./markdown-inline-dollar-math.js";
 import { normalizeMathFences } from "./markdown-math-fences.js";
+import { MARKDOWN_TABLE_START_OFFSET_VARIABLE } from "./markdown-table-breakout.js";
 import {
   markdownMayContainMath,
   useRehypeKatex,
@@ -47,6 +49,13 @@ import {
 } from "./markdown-katex-loader.js";
 import { CopyButton } from "./copy-button.js";
 import { Icon } from "@bb/shared-ui/icon";
+import { LINE_WRAP_LABEL } from "@/lib/code-overflow-mode";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@bb/shared-ui/tooltip";
 import { WorkspaceOpenTargetIcon } from "@/components/workspace-open-target/WorkspaceOpenTargetIcon";
 import { RouteAnchor } from "./app-route-anchor.js";
 import {
@@ -107,7 +116,7 @@ import {
 import { normalizePromptBlockquoteBoundaries } from "./markdown-prompt-blockquote-boundaries.js";
 import { MarkdownMermaidDiagram } from "./markdown-mermaid-diagram.js";
 import type { PromptTextMention } from "@bb/domain";
-import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
+import type { PromptMentionLinkResolver } from "@bb/client-core";
 import { usePreferredTheme, type Theme } from "@/hooks/useTheme";
 import {
   rewriteLocalhostLinkHref,
@@ -129,6 +138,7 @@ interface MarkdownPreviewProps {
   sourcePrefix?: string;
   imagePolicy?: MarkdownImagePolicy;
   incrementalBlocks?: boolean;
+  tableLayout?: "breakout" | "contained";
   linkRouting?: MarkdownLinkRouting;
   threadMentions?: MarkdownThreadMentions;
   promptMentions?: MarkdownPromptMentions;
@@ -154,6 +164,7 @@ interface IsMarkdownAppRouteHrefArgs {
 }
 
 interface BuildMarkdownComponentsArgs {
+  tableLayout: "breakout" | "contained";
   imagePolicy: MarkdownImagePolicy;
   imageSourceOffset: number;
   linkRouting?: MarkdownLinkRouting;
@@ -293,6 +304,7 @@ type MarkdownRemarkPlugins = NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
 
 const MARKDOWN_TABLE_BREAKOUT_LIMIT_VARIABLE = "--md-table-breakout-max";
 const MARKDOWN_TABLE_BREAKOUT_WIDTH = `max(100%, min(1100px, 100cqw - 2rem, var(${MARKDOWN_TABLE_BREAKOUT_LIMIT_VARIABLE}, 100cqw)))`;
+const MARKDOWN_TABLE_BREAKOUT_START_MARGIN = `var(${MARKDOWN_TABLE_START_OFFSET_VARIABLE}, calc((100% - ${MARKDOWN_TABLE_BREAKOUT_WIDTH}) / 2))`;
 const MARKDOWN_CONTENT_WIDTH_VARIABLE = "--md-content-w";
 const MARKDOWN_SOURCE_COLOR_SCHEME_MEDIA_PATTERN =
   /^\(\s*prefers-color-scheme\s*:\s*(dark|light)\s*\)$/iu;
@@ -441,6 +453,7 @@ const areMarkdownPreviewPropsEqual: MarkdownPreviewPropsEqual = (
   (previous.imagePolicy ?? "render") === (next.imagePolicy ?? "render") &&
   (previous.incrementalBlocks ?? false) === (next.incrementalBlocks ?? false) &&
   previous.urlTransform === next.urlTransform &&
+  (previous.tableLayout ?? "breakout") === (next.tableLayout ?? "breakout") &&
   areMarkdownThreadMentionsEqual({
     next: next.threadMentions,
     previous: previous.threadMentions,
@@ -580,7 +593,7 @@ function resolveInlineCodeFileHref({
     return null;
   }
 
-  return /[/\\]/u.test(codeText) ||
+  return /^(?:[/\\]|\.{1,2}[/\\]|[a-zA-Z]:[/\\]|file:\/\/)/u.test(codeText) ||
     /\.[\p{L}\p{N}_-]+$/u.test(target.link.path) ||
     target.link.lineRange !== null
     ? target.href
@@ -813,17 +826,24 @@ function MarkdownCodeBlock({
           {language ?? ""}
         </span>
         <div className="flex items-center gap-0.5">
-          <button
-            type="button"
-            aria-pressed={softWrap}
-            aria-label={softWrap ? "Disable line wrap" : "Wrap long lines"}
-            onClick={() => {
-              setSoftWrap((value) => !value);
-            }}
-            className="inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground transition-colors hover:text-foreground aria-pressed:text-foreground"
-          >
-            <Icon name="TextWrap" className="size-3" />
-          </button>
+          <TooltipProvider delayDuration={300}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  aria-pressed={softWrap}
+                  aria-label={LINE_WRAP_LABEL}
+                  onClick={() => {
+                    setSoftWrap((value) => !value);
+                  }}
+                  className="inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground transition-colors hover:text-foreground aria-pressed:text-foreground"
+                >
+                  <Icon name="TextWrap" className="size-3" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{LINE_WRAP_LABEL}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
           <CopyButton text={codeText} label="Copy code" />
         </div>
       </div>
@@ -1032,22 +1052,33 @@ function MarkdownBlockquote({ children }: MarkdownBlockquoteProps) {
   );
 }
 
+function ContainedMarkdownTable({ children }: MarkdownTableProps) {
+  return (
+    <div className="my-2 max-w-full overflow-x-auto">
+      <table className="border border-border">{children}</table>
+    </div>
+  );
+}
+
 function MarkdownTable({ children }: MarkdownTableProps) {
   const breakoutRef = useMarkdownTableContentWidthVariable();
 
   return (
     <div
       ref={breakoutRef}
-      className="my-2 flex justify-center"
+      className="my-2"
       style={{
         width: MARKDOWN_TABLE_BREAKOUT_WIDTH,
-        marginInline: `calc((100% - ${MARKDOWN_TABLE_BREAKOUT_WIDTH}) / 2)`,
+        marginInlineStart: MARKDOWN_TABLE_BREAKOUT_START_MARGIN,
+        marginInlineEnd: `calc(100% - ${MARKDOWN_TABLE_BREAKOUT_WIDTH} - ${MARKDOWN_TABLE_BREAKOUT_START_MARGIN})`,
       }}
     >
       <div
         className="w-max max-w-full overflow-x-auto"
         style={{
           minWidth: `min(var(${MARKDOWN_CONTENT_WIDTH_VARIABLE}, 100%), 100%)`,
+          marginInlineStart: `var(${MARKDOWN_TABLE_START_OFFSET_VARIABLE}, auto)`,
+          marginInlineEnd: "auto",
         }}
       >
         <table className="border border-border">{children}</table>
@@ -1144,6 +1175,7 @@ function resolveMarkdownSourceMedia({
 const EMPTY_THREAD_IDS: readonly string[] = [];
 
 function buildMarkdownComponents({
+  tableLayout,
   imagePolicy,
   imageSourceOffset,
   linkRouting,
@@ -1472,7 +1504,7 @@ function buildMarkdownComponents({
     pre: MarkdownPre,
     source: MarkdownSource,
     video: MarkdownVideo,
-    table: MarkdownTable,
+    table: tableLayout === "contained" ? ContainedMarkdownTable : MarkdownTable,
     td: MarkdownTableCell,
     th: MarkdownTableHeader,
     thead: MarkdownTableHead,
@@ -1690,10 +1722,15 @@ function readMarkdownTableBreakoutLimit({
   }
   const clipLeft = clip.getBoundingClientRect().left + clip.clientLeft;
   const clipRight = clipLeft + clip.clientWidth;
-  const room = Math.max(
-    0,
-    Math.min(parentLeft - clipLeft, clipRight - parentRight),
-  );
+  const endRoom = Math.max(0, clipRight - parentRight);
+  if (
+    parentStyle
+      .getPropertyValue(MARKDOWN_TABLE_START_OFFSET_VARIABLE)
+      .trim() !== ""
+  ) {
+    return { kind: "set", value: `calc(${parentWidth + endRoom}px - 1rem)` };
+  }
+  const room = Math.min(Math.max(0, parentLeft - clipLeft), endRoom);
   return { kind: "set", value: `${parentWidth + 2 * room}px` };
 }
 
@@ -1774,6 +1811,7 @@ function MarkdownPreviewComponent({
   sourcePrefix = "",
   imagePolicy = "render",
   incrementalBlocks = false,
+  tableLayout = "breakout",
   linkRouting,
   threadMentions,
   promptMentions,
@@ -1853,6 +1891,7 @@ function MarkdownPreviewComponent({
   const markdownComponents = useMemo(
     () =>
       buildMarkdownComponents({
+        tableLayout,
         imagePolicy,
         imageSourceOffset,
         linkRouting,
@@ -1864,6 +1903,7 @@ function MarkdownPreviewComponent({
         hasMessageDirectives: messageDirectiveMounts !== null,
       }),
     [
+      tableLayout,
       linkRouting,
       imagePolicy,
       imageSourceOffset,
@@ -1879,6 +1919,7 @@ function MarkdownPreviewComponent({
     const plugins: MarkdownRemarkPlugins = [
       remarkGfm,
       [remarkMath, { singleDollarTextMath: false }],
+      remarkInlineDollarMath,
     ];
     if (
       threadMentions?.preserveSoftBreaks === true ||
