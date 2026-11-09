@@ -22,6 +22,7 @@ describe("desktop update feed url", () => {
 describe("custom desktop release", () => {
   it("uses a separate app identity without an update feed", () => {
     expect(createDesktopReleaseInfo("custom")).toEqual({
+      appId: "dev.bb.desktop.custom",
       applicationName: "BB Custom",
       channel: "custom",
       iconFileName: "icon.png",

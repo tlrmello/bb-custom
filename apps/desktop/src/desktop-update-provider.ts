@@ -6,6 +6,7 @@ import {
 type DesktopReleaseChannel = "latest" | "nightly" | "custom";
 
 interface DesktopReleaseInfo {
+  appId: "dev.bb.desktop" | "dev.bb.desktop.nightly" | "dev.bb.desktop.custom";
   applicationName: "bb" | "bb Nightly" | "BB Custom";
   channel: DesktopReleaseChannel;
   iconFileName: "icon.png" | "icon-nightly.png";
@@ -18,6 +19,7 @@ export function createDesktopReleaseInfo(
 ): DesktopReleaseInfo {
   if (channel === "custom") {
     return {
+      appId: "dev.bb.desktop.custom",
       applicationName: "BB Custom",
       channel,
       iconFileName: "icon.png",
@@ -29,6 +31,7 @@ export function createDesktopReleaseInfo(
   const releaseTag = nightly ? "desktop-nightly" : "desktop-latest";
 
   return {
+    appId: nightly ? "dev.bb.desktop.nightly" : "dev.bb.desktop",
     applicationName: nightly ? "bb Nightly" : "bb",
     channel,
     iconFileName: nightly ? "icon-nightly.png" : "icon.png",

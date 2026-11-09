@@ -1,10 +1,17 @@
+import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
+import { tmpdir, homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import {
   experimental_runVcsProcess as runVcsProcess,
   experimental_sanitizeInheritedChildProcessEnv as sanitizeInheritedChildProcessEnv,
   experimental_spawnPortableOutputProcess as spawnPortableOutputProcess,
   type ExperimentalVcsProcessPriority,
 } from "@get-bb/plugin-sdk/host";
-import { runGit, type GitCommandResult } from "bb-environment-provider-host/git";
+import {
+  runGit,
+  type GitCommandResult,
+} from "bb-environment-provider-host/git";
 import {
   gitHubPullRequestViewSchema,
   type GitHubPullRequestCheck,
@@ -23,31 +30,15 @@ const GH_PR_VIEW_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const GH_PR_ACTION_TIMEOUT_MS = 60_000;
 const GH_PR_ACTION_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
-const GH_PR_VIEW_JSON_FIELDS = [
-  "number",
-  "title",
-  "state",
-  "url",
-  "isDraft",
-  "autoMergeRequest",
-  "baseRefName",
-  "headRefName",
-  "updatedAt",
-  "statusCheckRollup",
-  "reviewDecision",
-  "reviewRequests",
-  "mergeStateStatus",
-  "mergeable",
-].join(",");
-
 interface GetPullRequestForCurrentBranchArgs {
   cwd: string;
   localBranch: string;
+  refresh: boolean;
 }
 
-interface RunPullRequestActionForCurrentBranchArgs {
+interface RunPullRequestActionArgs {
   cwd: string;
-  localBranch: string;
+  url: string;
   action: HostPullRequestAction;
 }
 
@@ -126,9 +117,7 @@ function normalizeMergeStateStatus(
   }
 }
 
-function normalizeMergeable(
-  value: unknown,
-): GitHubPullRequestMergeable | null {
+function normalizeMergeable(value: unknown): GitHubPullRequestMergeable | null {
   switch (normalizeUppercase(value)) {
     case "CONFLICTING":
       return "CONFLICTING";
@@ -219,9 +208,47 @@ function normalizeCheckName(object: JsonObject): string {
   if (explicitName && explicitName.trim()) return explicitName.trim();
   const context = getString(object, "context");
   if (context && context.trim()) return context.trim();
-  const workflowName = getString(object, "workflowName");
-  if (workflowName && workflowName.trim()) return workflowName.trim();
   return "Unnamed check";
+}
+
+interface CheckWorkflowRun {
+  workflow: string;
+  runNumber: number;
+}
+
+const checkWorkflowRuns = new WeakMap<
+  GitHubPullRequestCheck,
+  CheckWorkflowRun
+>();
+
+function normalizeCheckWorkflowRun(
+  object: JsonObject,
+): CheckWorkflowRun | null {
+  const run = asObject(asObject(object.checkSuite)?.workflowRun);
+  if (run === null) return null;
+  const workflowId = getNumber(asObject(run.workflow) ?? {}, "databaseId");
+  const event = getString(run, "event");
+  const runNumber = getNumber(run, "runNumber");
+  if (workflowId === null || event === null || runNumber === null) return null;
+  return { workflow: `${workflowId}:${event}`, runNumber };
+}
+
+function dropSupersededWorkflowRuns(
+  checks: GitHubPullRequestCheck[],
+): GitHubPullRequestCheck[] {
+  const latestRuns = new Map<string, number>();
+  for (const check of checks) {
+    const run = checkWorkflowRuns.get(check);
+    if (run === undefined) continue;
+    latestRuns.set(
+      run.workflow,
+      Math.max(latestRuns.get(run.workflow) ?? 0, run.runNumber),
+    );
+  }
+  return checks.filter((check) => {
+    const run = checkWorkflowRuns.get(check);
+    return run === undefined || run.runNumber === latestRuns.get(run.workflow);
+  });
 }
 
 function normalizeChecks(value: unknown): GitHubPullRequestCheck[] {
@@ -251,10 +278,6 @@ function normalizeChecks(value: unknown): GitHubPullRequestCheck[] {
   return checks;
 }
 
-function getArrayLength(value: unknown): number {
-  return Array.isArray(value) ? value.length : 0;
-}
-
 function normalizeGitHubPullRequestView(
   json: unknown,
 ): GitHubPullRequestView | null {
@@ -272,10 +295,12 @@ function normalizeGitHubPullRequestView(
     inMergeQueue: null,
     baseRefName: getString(object, "baseRefName"),
     headRefName: getString(object, "headRefName"),
+    headRefOid: getString(object, "headRefOid"),
     updatedAt: getString(object, "updatedAt"),
     checks: normalizeChecks(object.statusCheckRollup),
     reviewDecision: normalizeReviewDecision(object.reviewDecision),
-    reviewRequestCount: getArrayLength(object.reviewRequests),
+    reviewRequestCount:
+      getNumber(asObject(object.reviewRequests) ?? {}, "totalCount") ?? 0,
     mergeStateStatus: normalizeMergeStateStatus(object.mergeStateStatus),
     mergeable: normalizeMergeable(object.mergeable),
   };
@@ -298,16 +323,15 @@ function getMergeMethodFlag(
 
 function buildPullRequestActionArgs(
   action: HostPullRequestAction,
-  selector: string | null,
+  url: string,
 ): string[] {
-  const target = selector ? [selector] : [];
   switch (action.operation) {
     case "ready":
-      return ["pr", "ready", ...target];
+      return ["pr", "ready", url];
     case "draft":
-      return ["pr", "ready", ...target, "--undo"];
+      return ["pr", "ready", url, "--undo"];
     case "merge":
-      return ["pr", "merge", ...target, getMergeMethodFlag(action.method)];
+      return ["pr", "merge", url, getMergeMethodFlag(action.method)];
   }
 }
 
@@ -342,7 +366,12 @@ function describeGhActionFailure(args: string[], error: unknown): string {
 
 function runGhAdmitted(
   args: string[],
-  options: { cwd: string; timeoutMs: number; maxBuffer: number },
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    maxBuffer: number;
+    env: NodeJS.ProcessEnv;
+  },
 ): Promise<{ stdout: string }> {
   return new Promise((resolve, reject) => {
     const stdout: Buffer[] = [];
@@ -355,7 +384,7 @@ function runGhAdmitted(
       command: "gh",
       args,
       cwd: options.cwd,
-      env: sanitizeInheritedChildProcessEnv({ env: process.env }),
+      env: options.env,
     });
     const timer = setTimeout(() => {
       timedOut = true;
@@ -424,27 +453,28 @@ function runGh(
     priority: ExperimentalVcsProcessPriority;
     timeoutMs: number;
     maxBuffer: number;
+    env?: NodeJS.ProcessEnv;
   },
 ): Promise<{ stdout: string }> {
-  return runVcsProcess("gh", args, () => runGhAdmitted(args, options), {
-    priority: options.priority,
-  });
+  const env =
+    options.env ?? sanitizeInheritedChildProcessEnv({ env: process.env });
+  return runVcsProcess(
+    "gh",
+    args,
+    () => runGhAdmitted(args, { ...options, env }),
+    {
+      priority: options.priority,
+    },
+  );
 }
 
-export function parseGitHubPullRequestView(
-  stdout: string,
-): GitHubPullRequestView | null {
-  const trimmed = stdout.trim();
-  if (!trimmed) {
-    return null;
-  }
-  let json: unknown;
+function parsePullRequestViewUrl(stdout: string): string | null {
   try {
-    json = JSON.parse(trimmed);
+    const url = getString(asObject(JSON.parse(stdout)) ?? {}, "url");
+    return url === null ? null : new URL(url).toString();
   } catch {
     return null;
   }
-  return normalizeGitHubPullRequestView(json);
 }
 
 const GH_NO_PULL_REQUEST_PATTERN = /no pull requests found for branch/iu;
@@ -457,6 +487,7 @@ type PullRequestTargetLookup =
 interface GitRemoteRepository {
   host: string;
   owner: string;
+  repository: string;
 }
 
 function ghCommandUnavailable(
@@ -566,13 +597,16 @@ function parseGitRemoteRepository(
   ) {
     return null;
   }
-  return { host: host.toLowerCase(), owner };
+  return { host: host.toLowerCase(), owner, repository };
 }
 
-async function getPullRequestTarget(
-  args: GetPullRequestForCurrentBranchArgs,
-): Promise<PullRequestTargetLookup> {
-  const branchConfigPrefix = `branch.${args.localBranch}`;
+type BranchConfigRead =
+  | { outcome: "read"; config: Map<string, string> }
+  | Extract<HostPullRequestLookup, { outcome: "unavailable" }>;
+
+async function readBranchConfig(
+  args: Pick<GetPullRequestForCurrentBranchArgs, "cwd" | "localBranch">,
+): Promise<BranchConfigRead> {
   const escapedBranch = escapeGitConfigRegexp(args.localBranch);
   let configResult: GitCommandResult;
   try {
@@ -581,7 +615,7 @@ async function getPullRequestTarget(
         "config",
         "--null",
         "--get-regexp",
-        `^(branch\\.${escapedBranch}\\.(remote|merge)|remote\\..*\\.url)$`,
+        `^(branch\\.${escapedBranch}\\.(remote|merge|pushremote)|remote\\.pushdefault|remote\\..*\\.(url|gh-resolved))$`,
       ],
       {
         cwd: args.cwd,
@@ -601,8 +635,17 @@ async function getPullRequestTarget(
       configResult.stderr.trim(),
     );
   }
+  return {
+    outcome: "read",
+    config: parseNullTerminatedGitConfig(configResult.stdout),
+  };
+}
 
-  const config = parseNullTerminatedGitConfig(configResult.stdout);
+function getPullRequestTarget(
+  localBranch: string,
+  config: Map<string, string>,
+): PullRequestTargetLookup {
+  const branchConfigPrefix = `branch.${localBranch}`;
   const remote = config.get(`${branchConfigPrefix}.remote`) ?? "";
   const remoteRef = config.get(`${branchConfigPrefix}.merge`) ?? "";
   const remoteBranchPrefix = "refs/heads/";
@@ -611,7 +654,7 @@ async function getPullRequestTarget(
   }
 
   const upstreamBranch = remoteRef.slice(remoteBranchPrefix.length);
-  if (!upstreamBranch || upstreamBranch === args.localBranch) {
+  if (!upstreamBranch || upstreamBranch === localBranch) {
     return { outcome: "current-branch" };
   }
 
@@ -652,84 +695,154 @@ async function getPullRequestTarget(
   };
 }
 
-export async function getPullRequestForCurrentBranch(
-  args: GetPullRequestForCurrentBranchArgs,
-): Promise<HostPullRequestLookup> {
-  const target = await getPullRequestTarget(args);
-  if (target.outcome === "unavailable") {
-    return target;
+const GH_REMOTE_PRIORITY: Readonly<Record<string, number>> = {
+  upstream: 3,
+  github: 2,
+  origin: 1,
+};
+
+function parseGhRepoOverride(value: string): GitRemoteRepository | null {
+  const segments = value.trim().split("/");
+  if (segments.length === 2)
+    return parseGitRemoteRepository(`https://github.com/${segments.join("/")}`);
+  if (segments.length === 3)
+    return parseGitRemoteRepository(`https://${segments.join("/")}`);
+  return null;
+}
+
+function resolveBranchReadTarget(
+  localBranch: string,
+  config: Map<string, string>,
+  target: Exclude<PullRequestTargetLookup, { outcome: "unavailable" }>,
+): Extract<ReadTarget, { kind: "branch" }> | null {
+  const branchKey = `branch.${localBranch}`;
+  const remotes: {
+    name: string;
+    repository: GitRemoteRepository;
+    resolved: string | null;
+  }[] = [];
+  for (const [key, value] of config) {
+    if (!key.startsWith("remote.") || !key.endsWith(".url")) continue;
+    const name = key.slice("remote.".length, -".url".length);
+    const repository = parseGitRemoteRepository(value);
+    if (repository === null) continue;
+    remotes.push({
+      name,
+      repository,
+      resolved: config.get(`remote.${name}.gh-resolved`) ?? null,
+    });
   }
+  const resolved = remotes.find((remote) => remote.resolved !== null);
+  const base = process.env.GH_REPO
+    ? parseGhRepoOverride(process.env.GH_REPO)
+    : resolved !== undefined && resolved.resolved !== "base"
+      ? parseGitRemoteRepository(
+          `https://${resolved.repository.host}/${resolved.resolved}`,
+        )
+      : (resolved?.repository ??
+        [...remotes].sort(
+          (a, b) =>
+            (GH_REMOTE_PRIORITY[b.name] ?? 0) -
+            (GH_REMOTE_PRIORITY[a.name] ?? 0),
+        )[0]?.repository ??
+        null);
+  if (base === null) return null;
+  const sameOwner = (owner: string) =>
+    owner.toLowerCase() === base.owner.toLowerCase();
+  if (target.outcome === "upstream-branch") {
+    const separator = target.selector.indexOf(":");
+    const owner = target.selector.slice(0, separator);
+    return {
+      kind: "branch",
+      host: base.host,
+      owner: base.owner,
+      repository: base.repository,
+      branch: target.selector.slice(separator + 1),
+      headOwner: sameOwner(owner) ? null : owner,
+    };
+  }
+  const pushRemote =
+    config.get(`${branchKey}.pushremote`) ??
+    config.get("remote.pushdefault") ??
+    config.get(`${branchKey}.remote`) ??
+    "";
+  const pushRepository =
+    remotes.find((remote) => remote.name === pushRemote)?.repository ??
+    parseGitRemoteRepository(pushRemote);
+  return {
+    kind: "branch",
+    host: base.host,
+    owner: base.owner,
+    repository: base.repository,
+    branch: localBranch,
+    headOwner:
+      pushRepository === null || sameOwner(pushRepository.owner)
+        ? null
+        : pushRepository.owner,
+  };
+}
+
+export async function prepareCurrentBranchRead(
+  args: GetPullRequestForCurrentBranchArgs,
+): Promise<PreparedRead> {
+  const branchConfig = await readBranchConfig(args);
+  if (branchConfig.outcome === "unavailable")
+    return preparedResult(branchConfig);
+  const target = getPullRequestTarget(args.localBranch, branchConfig.config);
+  if (target.outcome === "unavailable") return preparedResult(target);
+  const branchTarget = resolveBranchReadTarget(
+    args.localBranch,
+    branchConfig.config,
+    target,
+  );
+  if (branchTarget !== null)
+    return prepareRead(
+      branchTarget,
+      args.cwd,
+      sanitizeInheritedChildProcessEnv({ env: process.env }),
+      args.refresh,
+    );
   const ghArgs = [
     "pr",
     "view",
     ...(target.outcome === "upstream-branch" ? [target.selector] : []),
     "--json",
-    GH_PR_VIEW_JSON_FIELDS,
+    "url",
   ];
-  let stdout: string;
-  try {
-    ({ stdout } = await runGh(ghArgs, {
-      priority: "background",
-      cwd: args.cwd,
-      timeoutMs: GH_PR_VIEW_TIMEOUT_MS,
-      maxBuffer: GH_PR_VIEW_MAX_BUFFER_BYTES,
-    }));
-  } catch (error) {
-    return classifyPullRequestViewError(error);
-  }
-  const pullRequest = parseGitHubPullRequestView(stdout);
-  if (!pullRequest) {
-    return {
-      outcome: "unavailable",
-      message: "gh pr view returned unparseable output",
-    };
-  }
-  if (pullRequest.state === "OPEN" && !pullRequest.isDraft) {
-    try {
-      const { stdout: queueOutput } = await runGh(
-        [
-          "api",
-          "graphql",
-          "--hostname",
-          new URL(pullRequest.url).hostname,
-          "-f",
-          "query=query($url: URI!) { resource(url: $url) { ... on PullRequest { isInMergeQueue } } }",
-          "-f",
-          `url=${pullRequest.url}`,
-        ],
-        {
+  return {
+    kind: "direct",
+    async run() {
+      try {
+        const { stdout } = await runGh(ghArgs, {
           priority: "background",
           cwd: args.cwd,
           timeoutMs: GH_PR_VIEW_TIMEOUT_MS,
           maxBuffer: GH_PR_VIEW_MAX_BUFFER_BYTES,
-        },
-      );
-      const response = asObject(JSON.parse(queueOutput));
-      const data = asObject(response?.data);
-      const resource = asObject(data?.resource);
-      pullRequest.inMergeQueue = resource
-        ? getBoolean(resource, "isInMergeQueue")
-        : null;
-    } catch {
-      pullRequest.inMergeQueue = null;
-    }
-  } else {
-    pullRequest.inMergeQueue = false;
-  }
-  return { outcome: "found", pullRequest };
+        });
+        const url = parsePullRequestViewUrl(stdout);
+        if (url === null)
+          return {
+            outcome: "unavailable",
+            message: "gh pr view returned unparseable output",
+          };
+        return await getPullRequestByUrl(url, args.cwd);
+      } catch (error) {
+        return classifyPullRequestViewError(error);
+      }
+    },
+  };
 }
 
-export async function runPullRequestActionForCurrentBranch(
-  args: RunPullRequestActionForCurrentBranchArgs,
+export async function getPullRequestForCurrentBranch(
+  args: GetPullRequestForCurrentBranchArgs,
+): Promise<HostPullRequestLookup> {
+  return startRead(await prepareCurrentBranchRead(args));
+}
+
+export async function runPullRequestAction(
+  args: RunPullRequestActionArgs,
 ): Promise<{ ok: true } | { ok: false; message: string }> {
-  const target = await getPullRequestTarget(args);
-  if (target.outcome === "unavailable") {
-    return { ok: false, message: target.message };
-  }
-  const ghArgs = buildPullRequestActionArgs(
-    args.action,
-    target.outcome === "upstream-branch" ? target.selector : null,
-  );
+  const ghArgs = buildPullRequestActionArgs(args.action, args.url);
   try {
     await runGh(ghArgs, {
       priority: "interactive",
@@ -741,4 +854,446 @@ export async function runPullRequestActionForCurrentBranch(
     return { ok: false, message: describeGhActionFailure(ghArgs, error) };
   }
   return { ok: true };
+}
+
+type ReadTarget =
+  | { kind: "url"; host: string; url: string; cursor: string | null }
+  | {
+      kind: "branch";
+      host: string;
+      owner: string;
+      repository: string;
+      branch: string;
+      headOwner: string | null;
+    };
+type QueuedRead = {
+  target: ReadTarget;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  resolve(result: HostPullRequestLookup): void;
+};
+export type PreparedRead =
+  | {
+      kind: "batched";
+      target: ReadTarget;
+      cwd: string;
+      env: NodeJS.ProcessEnv;
+      group: string;
+      refresh: boolean;
+    }
+  | { kind: "direct"; run(): Promise<HostPullRequestLookup> };
+
+export function preparedResult(result: HostPullRequestLookup): PreparedRead {
+  return { kind: "direct", run: async () => result };
+}
+
+const MAX_DOCUMENT_READS = 25;
+const MAX_DOCUMENT_NODES = 500_000;
+
+function readNodes(target: ReadTarget): number {
+  return target.kind === "branch"
+    ? BRANCH_PULL_REQUESTS_PAGE * (1 + PULL_REQUEST_NODES)
+    : PULL_REQUEST_NODES;
+}
+
+const batches = new Map<string, QueuedRead[]>();
+const pendingReads = new Map<string, Promise<HostPullRequestLookup>>();
+const discovered = new Map<
+  string,
+  { result: HostPullRequestLookup; fetchedAt: number }
+>();
+const pausedUntil = new Map<string, number>();
+const mergeQueueUnsupported = new Set<string>();
+
+async function credentialKey(
+  host: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): Promise<string> {
+  const token =
+    host === "github.com" || host.endsWith(".ghe.com")
+      ? env.GH_TOKEN || env.GITHUB_TOKEN
+      : env.GH_ENTERPRISE_TOKEN || env.GITHUB_ENTERPRISE_TOKEN;
+  if (token)
+    return createHash("sha256")
+      .update(JSON.stringify([host, token]))
+      .digest("hex");
+  const appData = env.APPDATA ?? env.AppData;
+  const directory = resolve(
+    cwd,
+    env.GH_CONFIG_DIR ||
+      (env.XDG_CONFIG_HOME
+        ? join(env.XDG_CONFIG_HOME, "gh")
+        : process.platform === "win32" && appData
+          ? join(appData, "GitHub CLI")
+          : join(env.HOME ?? homedir(), ".config", "gh")),
+  );
+  const profile = await readFile(join(directory, "hosts.yml")).catch(() =>
+    Buffer.alloc(0),
+  );
+  return createHash("sha256")
+    .update(JSON.stringify([host, directory]))
+    .update(profile)
+    .digest("hex");
+}
+
+const REVIEW_REQUESTS_PAGE = 100;
+const CHECK_CONTEXTS_PAGE = 100;
+const BRANCH_PULL_REQUESTS_PAGE = 100;
+const PULL_REQUEST_NODES = REVIEW_REQUESTS_PAGE + 1 + CHECK_CONTEXTS_PAGE;
+
+function fields(cursor: string | null, mergeQueue: boolean): string {
+  return `number title state url isDraft autoMergeRequest { enabledAt }${mergeQueue ? " isInMergeQueue" : ""}
+    baseRefName headRefName headRefOid updatedAt reviewDecision reviewRequests(first: ${REVIEW_REQUESTS_PAGE}) { totalCount }
+    mergeStateStatus mergeable isCrossRepository headRepositoryOwner { login }
+    commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: ${CHECK_CONTEXTS_PAGE}${cursor === null ? "" : `, after: ${JSON.stringify(cursor)}`}) {
+      nodes { ... on CheckRun { name status conclusion detailsUrl startedAt
+          checkSuite { workflowRun { runNumber event workflow { databaseId } } } }
+        ... on StatusContext { context state targetUrl createdAt } }
+      pageInfo { hasNextPage endCursor }
+    } } } } }`;
+}
+
+function selection(
+  target: ReadTarget,
+  alias: string,
+  mergeQueue: boolean,
+): string {
+  if (target.kind === "url")
+    return `${alias}: resource(url: ${JSON.stringify(target.url)}) { ... on PullRequest { ${fields(target.cursor, mergeQueue)} } }`;
+  return `${alias}: repository(owner: ${JSON.stringify(target.owner)}, name: ${JSON.stringify(target.repository)}) {
+    defaultBranchRef { name }
+    pullRequests(headRefName: ${JSON.stringify(target.branch)}, first: ${BRANCH_PULL_REQUESTS_PAGE}, orderBy: {field: CREATED_AT, direction: DESC}) {
+      nodes { ${fields(null, mergeQueue)} }
+    }
+  }`;
+}
+
+function matchesBranchTarget(
+  pr: JsonObject,
+  target: Extract<ReadTarget, { kind: "branch" }>,
+  defaultBranch: string | null,
+): boolean {
+  const crossRepository = getBoolean(pr, "isCrossRepository") === true;
+  if (target.headOwner === null)
+    return (
+      !crossRepository &&
+      (pr.state === "OPEN" || target.branch !== defaultBranch)
+    );
+  return (
+    crossRepository &&
+    getString(
+      asObject(pr.headRepositoryOwner) ?? {},
+      "login",
+    )?.toLowerCase() === target.headOwner.toLowerCase()
+  );
+}
+
+async function decodeRead(
+  value: unknown,
+  entry: QueuedRead,
+): Promise<HostPullRequestLookup> {
+  let raw = asObject(value);
+  if (raw === null) return { outcome: "none" };
+  if (entry.target.kind === "branch") {
+    const target = entry.target;
+    const connection = asObject(raw.pullRequests);
+    const defaultBranch = getString(
+      asObject(raw.defaultBranchRef) ?? {},
+      "name",
+    );
+    const candidates = Array.isArray(connection?.nodes)
+      ? connection.nodes.flatMap((node) => {
+          const pr = asObject(node);
+          return pr !== null && matchesBranchTarget(pr, target, defaultBranch)
+            ? [pr]
+            : [];
+        })
+      : [];
+    raw = candidates.find((pr) => pr.state === "OPEN") ?? candidates[0] ?? null;
+    if (raw === null) return { outcome: "none" };
+  }
+  const commits = asObject(raw.commits);
+  const nodes = Array.isArray(commits?.nodes) ? commits.nodes : [];
+  const commit = asObject(asObject(nodes[0])?.commit);
+  const contexts = asObject(asObject(commit?.statusCheckRollup)?.contexts);
+  const contextNodes = Array.isArray(contexts?.nodes)
+    ? contexts.nodes.flatMap((node): JsonObject[] => {
+        const object = asObject(node);
+        return object === null ? [] : [object];
+      })
+    : [];
+  const view = normalizeGitHubPullRequestView({
+    ...raw,
+    statusCheckRollup: contextNodes,
+  });
+  if (view === null)
+    return {
+      outcome: "unavailable",
+      message: "GitHub returned an invalid pull request",
+    };
+  view.checks.forEach((check, index) => {
+    const run = normalizeCheckWorkflowRun(contextNodes[index] ?? {});
+    if (run !== null) checkWorkflowRuns.set(check, run);
+  });
+  view.inMergeQueue =
+    view.isDraft || view.state !== "OPEN"
+      ? false
+      : getBoolean(raw, "isInMergeQueue");
+  const pageInfo = asObject(contexts?.pageInfo);
+  if (pageInfo?.hasNextPage === true) {
+    const cursor = getString(pageInfo, "endCursor");
+    if (
+      cursor === null ||
+      (entry.target.kind === "url" && cursor === entry.target.cursor)
+    )
+      return {
+        outcome: "unavailable",
+        message: "GitHub returned an invalid checks cursor",
+      };
+    const next = await enqueueRead(
+      { kind: "url", host: entry.target.host, url: view.url, cursor },
+      entry.cwd,
+      entry.env,
+    );
+    if (next.outcome !== "found") return next;
+    if (next.pullRequest.headRefOid !== view.headRefOid)
+      return {
+        outcome: "unavailable",
+        message: "Pull request head changed while reading checks",
+      };
+    view.checks.push(...next.pullRequest.checks);
+  }
+  view.checks = dropSupersededWorkflowRuns(view.checks);
+  return { outcome: "found", pullRequest: view };
+}
+
+async function runGraphQLRead(
+  query: string,
+  entry: QueuedRead,
+): Promise<{ stdout: string }> {
+  const directory = await mkdtemp(join(tmpdir(), "bb-pr-read-"));
+  try {
+    const inputPath = join(directory, "query.json");
+    await writeFile(inputPath, JSON.stringify({ query }), { mode: 0o600 });
+    return await runGh(
+      [
+        "api",
+        "graphql",
+        "--hostname",
+        entry.target.host,
+        "--method",
+        "POST",
+        "--input",
+        inputPath,
+      ],
+      {
+        cwd: entry.cwd,
+        env: entry.env,
+        priority: "background",
+        timeoutMs: GH_PR_VIEW_TIMEOUT_MS,
+        maxBuffer: GH_PR_VIEW_MAX_BUFFER_BYTES,
+      },
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function requestBatch(
+  entries: QueuedRead[],
+  mergeQueue: boolean,
+): Promise<{ data: JsonObject | null; errors: JsonObject[] }> {
+  const query = `query { ${entries.map((entry, index) => selection(entry.target, `p${index}`, mergeQueue)).join("\n")} rateLimit { remaining resetAt } }`;
+  const { stdout } = await runGraphQLRead(query, entries[0]!).catch(
+    (error: unknown) => {
+      if (
+        error instanceof GhCommandError &&
+        error.reason === "failed" &&
+        error.stdout.trim().startsWith("{")
+      )
+        return { stdout: error.stdout };
+      throw error;
+    },
+  );
+  const response = asObject(JSON.parse(stdout));
+  return {
+    data: asObject(response?.data),
+    errors: Array.isArray(response?.errors)
+      ? response.errors.flatMap((error) => {
+          const object = asObject(error);
+          return object === null ? [] : [object];
+        })
+      : [],
+  };
+}
+
+async function flushBatch(group: string): Promise<void> {
+  const queued = batches.get(group);
+  if (queued === undefined) return;
+  batches.delete(group);
+  const chunks: QueuedRead[][] = [];
+  let nodes = 0;
+  for (const entry of queued) {
+    const entryNodes = readNodes(entry.target);
+    const current = chunks.at(-1);
+    if (
+      current === undefined ||
+      current.length === MAX_DOCUMENT_READS ||
+      nodes + entryNodes > MAX_DOCUMENT_NODES
+    ) {
+      chunks.push([entry]);
+      nodes = entryNodes;
+      continue;
+    }
+    current.push(entry);
+    nodes += entryNodes;
+  }
+  for (const entries of chunks) {
+    const paused = pausedUntil.get(group) ?? 0;
+    if (paused > Date.now()) {
+      for (const entry of entries)
+        entry.resolve({
+          outcome: "unavailable",
+          message: `GitHub rate limit: retry after ${new Date(paused).toISOString()}`,
+        });
+      continue;
+    }
+    try {
+      let { data, errors } = await requestBatch(
+        entries,
+        !mergeQueueUnsupported.has(group),
+      );
+      if (
+        !mergeQueueUnsupported.has(group) &&
+        errors.some((error) =>
+          /isInMergeQueue/u.test(getString(error, "message") ?? ""),
+        )
+      ) {
+        mergeQueueUnsupported.add(group);
+        ({ data, errors } = await requestBatch(entries, false));
+      }
+      if (
+        errors.some((error) =>
+          /rate limit|secondary rate|abuse detection/iu.test(
+            getString(error, "message") ?? "",
+          ),
+        )
+      )
+        pausedUntil.set(group, Date.now() + 60_000);
+      const rate = asObject(data?.rateLimit);
+      if (rate?.remaining === 0) {
+        const reset = Date.parse(getString(rate, "resetAt") ?? "");
+        pausedUntil.set(
+          group,
+          Number.isFinite(reset) ? reset : Date.now() + 60_000,
+        );
+      }
+      await Promise.all(
+        entries.map(async (entry, index) => {
+          const alias = `p${index}`;
+          const failed = errors.some(
+            (error) => !Array.isArray(error.path) || error.path[0] === alias,
+          );
+          if (failed || data === null || !(alias in data)) {
+            entry.resolve({
+              outcome: "unavailable",
+              message: "GitHub returned no result for this pull request",
+            });
+            return;
+          }
+          entry.resolve(await decodeRead(data[alias], entry));
+        }),
+      );
+    } catch (error) {
+      const detail = ghFailureDetail(error);
+      if (/rate limit|secondary rate|abuse detection/iu.test(detail))
+        pausedUntil.set(group, Date.now() + 60_000);
+      const result = ghCommandUnavailable(["api", "graphql"], error);
+      for (const entry of entries) entry.resolve(result);
+    }
+  }
+}
+
+async function prepareRead(
+  target: ReadTarget,
+  cwd: string,
+  inheritedEnv = sanitizeInheritedChildProcessEnv({ env: process.env }),
+  refresh = false,
+): Promise<PreparedRead> {
+  const env = { ...inheritedEnv };
+  const group = await credentialKey(target.host, env, cwd);
+  return { kind: "batched", target, cwd, env, group, refresh };
+}
+
+export function startRead(
+  prepared: PreparedRead,
+): Promise<HostPullRequestLookup> {
+  if (prepared.kind === "direct") return prepared.run();
+  const { target, cwd, env, group, refresh } = prepared;
+  const key = `${group}:${JSON.stringify(target)}`;
+  if (refresh) discovered.delete(key);
+  const cached = discovered.get(key);
+  if (
+    target.kind === "branch" &&
+    cached !== undefined &&
+    Date.now() - cached.fetchedAt < 10_000
+  )
+    return Promise.resolve(cached.result);
+  const pending = pendingReads.get(key);
+  if (pending !== undefined) return pending;
+  const result = new Promise<HostPullRequestLookup>((resolve) => {
+    const entries = batches.get(group);
+    const entry = { target, cwd, env, resolve };
+    if (entries !== undefined) entries.push(entry);
+    else {
+      batches.set(group, [entry]);
+      setTimeout(() => void flushBatch(group), 10);
+    }
+  })
+    .then((lookup) => {
+      if (target.kind === "branch" && lookup.outcome !== "unavailable") {
+        for (const [cachedKey, value] of discovered)
+          if (Date.now() - value.fetchedAt >= 10_000)
+            discovered.delete(cachedKey);
+        discovered.set(key, { result: lookup, fetchedAt: Date.now() });
+      }
+      return lookup;
+    })
+    .finally(() => pendingReads.delete(key));
+  pendingReads.set(key, result);
+  return result;
+}
+
+export async function readPullRequests(
+  preparations: readonly Promise<PreparedRead>[],
+): Promise<HostPullRequestLookup[]> {
+  const prepared = await Promise.all(preparations);
+  return Promise.all(prepared.map(startRead));
+}
+
+async function enqueueRead(
+  target: ReadTarget,
+  cwd: string,
+  inheritedEnv = sanitizeInheritedChildProcessEnv({ env: process.env }),
+  refresh = false,
+): Promise<HostPullRequestLookup> {
+  return startRead(await prepareRead(target, cwd, inheritedEnv, refresh));
+}
+
+export function prepareUrlRead(
+  url: string,
+  cwd: string,
+): Promise<PreparedRead> {
+  return prepareRead(
+    { kind: "url", host: new URL(url).hostname, url, cursor: null },
+    cwd,
+  );
+}
+
+export async function getPullRequestByUrl(
+  url: string,
+  cwd: string,
+): Promise<HostPullRequestLookup> {
+  return startRead(await prepareUrlRead(url, cwd));
 }

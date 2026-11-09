@@ -32,7 +32,7 @@ bb status --json
 | Enroll, create, update, suspend, or remove machines; move the server    | `bb guide machines`            |
 | Projects, sources, attachments, project files                           | `bb guide projects`            |
 | Providers, models, service tiers, custom models                         | `bb guide providers`           |
-| Dev servers and other long-running commands                             | `bb guide terminals`           |
+| Run a command on another machine; dev servers and long-running commands | `bb guide terminals`           |
 | Settings, keyboard shortcuts, sidebar preferences, themes, files, voice | `bb guide customization`       |
 | `AGENTS.md` and skills                                                  | `bb guide agent-configuration` |
 | Plugins and marketplaces                                                | `bb guide plugins`             |
@@ -82,6 +82,9 @@ A plugin's commands and settings are documented in that plugin's own skill.
   it sees the same files.
 - To check whether a thread ever received a message, search
   `bb thread log <thread-id> --all`, not the default page.
+- `status` is the run state, so an archived thread can read `idle`. Check
+  `thread.archivedAt` in `bb thread show <thread-id> --json` before treating a
+  thread as live.
 - Before retrying a failed thread, read `bb thread show <thread-id> --json` and
   `bb thread log <thread-id>`. Treat a thread the user stopped as intentionally
   stopped unless they ask you to continue.
@@ -111,7 +114,6 @@ bb environment providers --json
 bb provider list --environment "$BB_ENVIRONMENT_ID" --json
 bb thread show "$BB_THREAD_ID" --json
 bb thread context --self --json
-bb environment status "$BB_ENVIRONMENT_ID" --json
 bb plugin list --json
 bb skill list --environment "$BB_ENVIRONMENT_ID" --json
 ```

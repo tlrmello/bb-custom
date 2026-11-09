@@ -15,6 +15,7 @@ export type * from "./json-value.js";
 export * from "./rpc-contract.js";
 export { experimental_THREAD_ACTION_GROUPS } from "./thread-action-groups.js";
 export {
+  experimental_THREAD_CONTEXT_SEGMENT_GROUPS,
   experimental_THREAD_INFO_ROW_GROUPS,
   experimental_THREAD_INFO_SECTION_GROUPS,
 } from "./thread-info-groups.js";
@@ -27,3 +28,14 @@ export type {
 } from "@bb/sdk";
 
 export type * from "./machine-bootstrap.js";
+
+export {
+  normalizeHostPath as experimental_normalizeHostPath,
+  resolveHostPath as experimental_resolveHostPath,
+  isHostPathWithin as experimental_isHostPathWithin,
+  joinHostPath as experimental_joinHostPath,
+  getHostPathDirname as experimental_getHostPathDirname,
+  getHostPathBasename as experimental_getHostPathBasename,
+  getRelativeHostPath as experimental_getRelativeHostPath,
+  getHostPathComparisonKey as experimental_getHostPathComparisonKey,
+} from "@bb/domain";
